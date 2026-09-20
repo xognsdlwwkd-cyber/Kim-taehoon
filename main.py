@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.17"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -197,9 +197,27 @@ with engine.connect() as conn:
 # DB SESSION
 # -----------------------
 
+_last_purged_date = None
+
+
+def purge_previous_days(db: Session):
+    # 参加登録・組み合わせ・進行状況は「今日」しか使わないので、日付が変わったら
+    # 前日以前のデータは残さず消してしまう（Memberの名簿は重複チェックに使うため残す）
+    global _last_purged_date
+    today = today_jst()
+    if _last_purged_date == today:
+        return
+    db.query(TodaySparring).filter(TodaySparring.date != today).delete()
+    db.query(SparringGroup).filter(SparringGroup.date != today).delete()
+    db.query(SparringState).filter(SparringState.date != today).delete()
+    db.commit()
+    _last_purged_date = today
+
+
 def get_db():
     db = SessionLocal()
     try:
+        purge_previous_days(db)
         yield db
     finally:
         db.close()
