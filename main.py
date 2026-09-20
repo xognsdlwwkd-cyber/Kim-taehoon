@@ -3,7 +3,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResp
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import (
     create_engine, Column, Integer, String, Boolean,
-    Date, DateTime, ForeignKey, text
+    Date, DateTime, ForeignKey, text, or_
 )
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
 from datetime import datetime, date, timedelta
@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -226,14 +226,18 @@ NAME_VALIDATION_ATTRS = (
 
 
 def time_picker(name: str, first_default: int = 19, second_default: int = 0,
-                 first_max: int = 23, first_label: str = "時", second_label: str = "分") -> str:
+                 first_max: int = 23, first_label: str = "時", second_label: str = "分",
+                 min_hour: int = None, min_minute: int = 0) -> str:
+    # min_hourを指定すると、それより前の時刻はドロップダウンの選択肢自体に出さない
+    first_range = range(min_hour, first_max + 1) if min_hour is not None else range(first_max + 1)
     first_options = "".join(
         f'<option value="{i:02d}"{" selected" if i == first_default else ""}>{i:02d}</option>'
-        for i in range(first_max + 1)
+        for i in first_range
     )
+    second_range = range(min_minute, 60) if min_hour is not None else range(60)
     second_options = "".join(
         f'<option value="{i:02d}"{" selected" if i == second_default else ""}>{i:02d}</option>'
-        for i in range(60)
+        for i in second_range
     )
     return f"""
     <select name="{name}_a">{first_options}</select> {first_label}
@@ -584,7 +588,7 @@ def member_register_join_page():
     return html_page("スパーリング参加確認", body)
 
 
-def member_name_entry_form(on_time: str, late_time_a: str = "21", late_time_b: str = "30") -> str:
+def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: str = None) -> str:
     if on_time == "yes":
         return f"""
         <form action="/member/register/name" method="post">
@@ -593,11 +597,18 @@ def member_name_entry_form(on_time: str, late_time_a: str = "21", late_time_b: s
             <button type="submit">登録</button>
         </form>
         """
+    now = now_jst()
+    default_hour = int(late_time_a) if late_time_a else now.hour
+    default_minute = int(late_time_b) if late_time_b else now.minute
+    # 現在時刻より前の値が渡された場合は現在時刻まで繰り上げる
+    if default_hour < now.hour or (default_hour == now.hour and default_minute < now.minute):
+        default_hour, default_minute = now.hour, now.minute
     return f"""
     <form action="/member/register/name" method="post">
         <input type="hidden" name="on_time" value="no" />
         何時に来ますか？<br>
-        {time_picker("late_time", first_default=int(late_time_a), second_default=int(late_time_b))}
+        {time_picker("late_time", first_default=default_hour, second_default=default_minute,
+                      min_hour=now.hour, min_minute=now.minute)}
         <br><br>
         名前（重複不可）: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">登録</button>
@@ -621,7 +632,7 @@ def member_register_name(
 ):
     existing = db.query(Member).filter(Member.name == name).first()
     if existing:
-        form_html = member_name_entry_form(on_time, late_time_a or "21", late_time_b or "30")
+        form_html = member_name_entry_form(on_time, late_time_a, late_time_b)
         return html_page("スパー参加登録", f"""
         <script>alert("Your name is already enrolled, add more letters to distinguish");</script>
         {form_html}
@@ -723,17 +734,22 @@ def member_edit_time_select(name: str = Form(...), db: Session = Depends(get_db)
         """)
 
     member_id = ts.member_id
-    h_default, m_default = 21, 30
+    now = now_jst()
+    h_default, m_default = now.hour, now.minute
     if ts.late_time and ":" in ts.late_time:
         h_str, m_str = ts.late_time.split(":")
         h_default, m_default = int(h_str), int(m_str)
+        # 現在時刻より前の値が渡された場合は現在時刻まで繰り上げる
+        if h_default < now.hour or (h_default == now.hour and m_default < now.minute):
+            h_default, m_default = now.hour, now.minute
 
     body = f"""
     <p>{ts.member.name} さんのスパー参加時間を編集</p>
     <form action="/member/register/edit_time/save" method="post">
         <input type="hidden" name="member_id" value="{member_id}" />
         何時に来ますか？<br>
-        {time_picker("late_time", first_default=h_default, second_default=m_default)}
+        {time_picker("late_time", first_default=h_default, second_default=m_default,
+                      min_hour=now.hour, min_minute=now.minute)}
         <br><br>
         <button type="submit">更新</button>
     </form>
@@ -790,6 +806,7 @@ def member_edit_time_cancel(member_id: int = Form(...), db: Session = Depends(ge
     member_name = ts.member.name
     db.delete(ts)
     db.commit()
+    resolve_pairs_after_absence(db, member_id, today)
 
     body = f"""
     <p>{member_name} さんの本日の参加を取り消しました。</p>
@@ -1003,6 +1020,7 @@ def admin_members_remove(member_id: int = Form(...), db: Session = Depends(get_d
     if ts:
         db.delete(ts)
         db.commit()
+        resolve_pairs_after_absence(db, member_id, today)
     return RedirectResponse(url="/admin/members", status_code=303)
 
 
@@ -1083,6 +1101,67 @@ def admin_setup(
     db.add(setting)
     db.commit()
     return RedirectResponse(url="/admin", status_code=303)
+
+
+def resolve_pairs_after_absence(db: Session, absent_member_id: int, today: date):
+    # 現在表示中の4ラウンド（現在＋次の3）はそのまま固定し、
+    # それより先のラウンドのペアだけを待機者と直接入れ替える。
+    state = db.query(SparringState).filter(SparringState.date == today).first()
+    current_round = state.current_round if state else 1
+    locked_until = current_round + 3
+
+    active_ids = set(
+        mid for (mid,) in db.query(TodaySparring.member_id).filter(TodaySparring.date == today).all()
+    )
+
+    affected_pairs = db.query(SparringGroup).filter(
+        SparringGroup.date == today,
+        SparringGroup.is_waiting == False,
+        SparringGroup.round_number > locked_until,
+        or_(
+            SparringGroup.member_a_id == absent_member_id,
+            SparringGroup.member_b_id == absent_member_id
+        )
+    ).all()
+
+    for pair in affected_pairs:
+        round_num = pair.round_number
+        a_gone = pair.member_a_id not in active_ids
+        b_gone = pair.member_b_id not in active_ids
+        needed = (1 if a_gone else 0) + (1 if b_gone else 0)
+        if needed == 0:
+            continue
+
+        waiting_rows = db.query(SparringGroup).filter(
+            SparringGroup.date == today,
+            SparringGroup.round_number == round_num,
+            SparringGroup.is_waiting == True,
+            SparringGroup.waiting_member_id.in_(active_ids)
+        ).limit(needed).all()
+
+        if len(waiting_rows) < needed:
+            # 補充できる待機者が足りない場合はそのペアを解消する
+            if needed == 1:
+                remaining_id = pair.member_b_id if a_gone else pair.member_a_id
+                db.add(SparringGroup(
+                    round_number=round_num, pair_number=0,
+                    waiting_member_id=remaining_id, is_waiting=True,
+                    remaining_time=pair.remaining_time, date=today
+                ))
+            db.delete(pair)
+            continue
+
+        for w in waiting_rows:
+            new_id = w.waiting_member_id
+            db.delete(w)
+            if a_gone:
+                pair.member_a_id = new_id
+                a_gone = False
+            else:
+                pair.member_b_id = new_id
+                b_gone = False
+
+    db.commit()
 
 
 @app.get("/admin/generate", response_class=HTMLResponse)
