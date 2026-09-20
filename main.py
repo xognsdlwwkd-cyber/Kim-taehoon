@@ -13,6 +13,7 @@ import uvicorn
 import io
 import os
 import sys
+import socket
 import qrcode
 import json
 
@@ -21,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.6"
+APP_VERSION = "1.0.7"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -47,15 +48,28 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATABASE_URL = f"sqlite:///{os.path.join(DATA_DIR, 'dojo.db')}"
 
 
+def get_local_lan_ip() -> str:
+    """同じWi-Fi上のスマホからアクセスできるよう、このPCのLAN内IPを推測する。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "localhost"
+    finally:
+        s.close()
+
+
 def get_base_url() -> str:
     """公開URL（例: https://xxx.onrender.com）を返す。
     Renderはウェブサービスに RENDER_EXTERNAL_URL を自動設定する。
-    それが無い場合は PUBLIC_BASE_URL を手動設定するか、ローカル開発用にlocalhostへ。"""
+    それが無い場合は PUBLIC_BASE_URL を手動設定するか、
+    ローカル開発ではスマホからも開けるようLAN内IPを使う。"""
     url = os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("PUBLIC_BASE_URL")
     if url:
         return url.rstrip("/")
     port = os.environ.get("PORT", "8000")
-    return f"http://localhost:{port}"
+    return f"http://{get_local_lan_ip()}:{port}"
 
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -551,6 +565,49 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
+    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:16px;">
+        <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
+    </div>
+    <div class="popup-overlay" id="qr-share-popup">
+        <div class="popup-box">
+            <p>メンバー参加用QRコード<span class="btn-sub" style="display:block;">Member join QR code</span></p>
+            <img src="/qr/member" width="220" height="220" alt="Member QR" style="border-radius:8px;" />
+            <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="shareQrImage()">共有<span class="btn-sub">Share</span></button>
+                <button onclick="document.getElementById('qr-share-popup').style.display='none'" style="background:#999;">閉じる<span class="btn-sub">Close</span></button>
+            </div>
+        </div>
+    </div>
+    <script>
+        function openQrShareBox() {{
+            document.getElementById('qr-share-popup').style.display = 'block';
+        }}
+        async function shareQrImage() {{
+            try {{
+                const resp = await fetch('/qr/member');
+                const blob = await resp.blob();
+                const file = new File([blob], 'member-qr.png', {{ type: 'image/png' }});
+                if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
+                    await navigator.share({{ files: [file], title: 'スパー参加用QRコード' }});
+                }} else if (navigator.share) {{
+                    await navigator.share({{ title: 'スパー参加用QRコード', url: window.location.origin + '/qr/member' }});
+                }} else {{
+                    alert('この端末では共有機能が使えません。リンク: ' + window.location.origin + '/qr/member');
+                }}
+            }} catch (e) {{}}
+        }}
+        async function sharePageLink() {{
+            try {{
+                if (navigator.share) {{
+                    await navigator.share({{ title: document.title, url: window.location.href }});
+                }} else {{
+                    await navigator.clipboard.writeText(window.location.href);
+                    alert('リンクをコピーしました / Link copied');
+                }}
+            }} catch (e) {{}}
+        }}
+    </script>
     <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
         <div style="text-align:center;">
             <p style="font-weight:bold; color:#555; margin-bottom:8px;">Instructor</p>
@@ -655,7 +712,7 @@ def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: s
 @app.post("/member/register/attendance", response_class=HTMLResponse)
 def member_register_attendance(on_time: str = Form(...)):
     body = member_name_entry_form(on_time)
-    return html_page("スパー参加登録", body)
+    return html_page("スパー参加登録", body, back_url="/member/register")
 
 
 @app.post("/member/register/name", response_class=HTMLResponse)
@@ -670,9 +727,9 @@ def member_register_name(
     if existing:
         form_html = member_name_entry_form(on_time, late_time_a, late_time_b)
         return html_page("スパー参加登録", f"""
-        <script>alert("Your name is already enrolled, add more letters to distinguish");</script>
+        <script>alert("この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish");</script>
         {form_html}
-        """)
+        """, back_url="/member/register")
     member = Member(name=name)
     db.add(member)
     db.commit()
@@ -991,7 +1048,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
     body = f"""
     <h2>本日の参加者</h2>
     <p id="participant-count" style="color:#666; margin-top:-8px;">Total applicants: {len(members_today)}名</p>
-    <form action="/admin/members/add" method="post" style="margin-bottom:16px;">
+    <form id="add-form" onsubmit="return submitAddParticipant(event, this)" style="margin-bottom:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
     </form>
@@ -1001,6 +1058,25 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
     </div>
 
     <script>
+        function submitAddParticipant(event, form) {{
+            event.preventDefault();
+            const input = form.querySelector('input[name="name"]');
+            const name = input.value.trim();
+            if (!name) return false;
+            fetch('/admin/members/add', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                body: 'name=' + encodeURIComponent(name)
+            }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                if (data.status === 'duplicate') {{
+                    alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
+                }} else {{
+                    input.value = '';
+                    if (typeof refreshParticipants === 'function') refreshParticipants();
+                }}
+            }}).catch(function() {{}});
+            return false;
+        }}
         (function() {{
             function escapeHtml(s) {{
                 return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -1026,6 +1102,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
                     }}).join('');
                 }}).catch(function() {{}});
             }}
+            window.refreshParticipants = refreshParticipants;
             setInterval(refreshParticipants, 4000);
         }})();
     </script>
@@ -1066,10 +1143,9 @@ def admin_members_remove(member_id: int = Form(...), db: Session = Depends(get_d
     return RedirectResponse(url="/admin/members", status_code=303)
 
 
-@app.post("/admin/members/add", response_class=HTMLResponse)
+@app.post("/admin/members/add")
 def admin_members_add(
     name: str = Form(...),
-    next_url: str = Form("/admin/members"),
     db: Session = Depends(get_db),
     _auth: None = Depends(require_admin)
 ):
@@ -1081,12 +1157,7 @@ def admin_members_add(
             TodaySparring.date == today
         ).first()
         if existing_ts:
-            return HTMLResponse(f"""
-            <script>
-                alert("Your name is already enrolled, add more letters to distinguish");
-                window.location.href = "{next_url}";
-            </script>
-            """)
+            return JSONResponse({"status": "duplicate"})
     else:
         member = Member(name=name)
         db.add(member)
@@ -1099,7 +1170,11 @@ def admin_members_add(
     ts.late_time = None
     db.commit()
 
-    return RedirectResponse(url=next_url, status_code=303)
+    # 途中参加者は、画面外のラウンドに優先的に組み込む
+    insert_late_joiner_priority(db, member.id, today)
+
+    count = db.query(TodaySparring).filter(TodaySparring.date == today).count()
+    return JSONResponse({"status": "ok", "count": count})
 
 
 @app.get("/admin/setup", response_class=HTMLResponse)
@@ -1417,7 +1492,8 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <form action="/admin/status/resume_round" method="post" style="margin:0;">
                     <button type="submit" style="background:#4a90e2;">再開する (Resume)</button>
                 </form>
-                <form action="/admin/status/next_round" method="post" style="margin:0;">
+                <form action="/admin/status/next_round" method="post" style="margin:0;"
+                    onsubmit="return confirm('ラウンドをスキップしますか？ / Skip this round?')">
                     <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
                 </form>
             </div>
@@ -1431,7 +1507,8 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <form action="/admin/status/pause_round" method="post" style="margin:0;">
                     <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
                 </form>
-                <form action="/admin/status/next_round" method="post" style="margin:0;">
+                <form action="/admin/status/next_round" method="post" style="margin:0;"
+                    onsubmit="return confirm('ラウンドをスキップしますか？ / Skip this round?')">
                     <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
                 </form>
             </div>
@@ -1467,12 +1544,6 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                     </div>
                 </div>
             </div>
-            <div id="advance-round-fallback" style="display:none; margin-top:20px;">
-                <p style="color:#666;">準備ができたら次のラウンドへ進んでください。</p>
-                <form action="/admin/status/next_round" method="post">
-                    <button type="submit">次のラウンドへ進む</button>
-                </form>
-            </div>
             <script>
                 const startTime = new Date("{start_iso}");
                 const duration = {round_duration_seconds};
@@ -1485,7 +1556,6 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                         timerEl.innerText = "00:00";
                         if (timerInterval) clearInterval(timerInterval);
                         document.getElementById('round-complete-popup').style.display = 'block';
-                        document.getElementById('advance-round-fallback').style.display = 'block';
                     }} else {{
                         const m = String(Math.floor(remaining / 60)).padStart(2, '0');
                         const s = String(remaining % 60).padStart(2, '0');
@@ -1516,35 +1586,8 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             </div>
             """
 
-    qr_share_html = """
-    <div class="popup-overlay" id="qr-share-popup">
-        <div class="popup-box">
-            <p>メンバー参加用QRコード<span class="btn-sub" style="display:block;">Member join QR code</span></p>
-            <img src="/qr/member" width="220" height="220" alt="Member QR" style="border-radius:8px;" />
-            <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
-                <button onclick="shareQrImage()">共有<span class="btn-sub">Share</span></button>
-                <button onclick="document.getElementById('qr-share-popup').style.display='none'" style="background:#999;">閉じる<span class="btn-sub">Close</span></button>
-            </div>
-        </div>
-    </div>
+    share_link_script = """
     <script>
-        function openQrShareBox() {
-            document.getElementById('qr-share-popup').style.display = 'block';
-        }
-        async function shareQrImage() {
-            try {
-                const resp = await fetch('/qr/member');
-                const blob = await resp.blob();
-                const file = new File([blob], 'member-qr.png', { type: 'image/png' });
-                if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                    await navigator.share({ files: [file], title: 'スパー参加用QRコード' });
-                } else if (navigator.share) {
-                    await navigator.share({ title: 'スパー参加用QRコード', url: window.location.origin + '/qr/member' });
-                } else {
-                    alert('この端末では共有機能が使えません。リンク: ' + window.location.origin + '/qr/member');
-                }
-            } catch (e) {}
-        }
         async function sharePageLink() {
             try {
                 if (navigator.share) {
@@ -1561,10 +1604,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
     body = f"""
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
         <button onclick="toggleMemberQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替</button>
-        <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
         <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
-    {qr_share_html}
+    {share_link_script}
     {info_html}
     <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; text-align:left;">
         <div style="flex:1 1 300px; background:#dceeff; border-radius:12px; padding:16px;">
@@ -1573,11 +1615,30 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
         <div style="flex:1 1 300px;">
             <div style="padding:16px; background:#f2f2f2; border-radius:12px; text-align:left; margin-bottom:20px;">
                 <h4 style="margin:0 0 10px;">参加者を直接追加<span class="btn-sub" style="display:inline;">Add participant directly</span></h4>
-                <form action="/admin/members/add" method="post">
-                    <input type="hidden" name="next_url" value="/admin/status" />
+                <form onsubmit="return submitAddParticipantStatus(event, this)">
                     名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
                     <button type="submit">追加</button>
                 </form>
+                <script>
+                    function submitAddParticipantStatus(event, form) {{
+                        event.preventDefault();
+                        const input = form.querySelector('input[name="name"]');
+                        const name = input.value.trim();
+                        if (!name) return false;
+                        fetch('/admin/members/add', {{
+                            method: 'POST',
+                            headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                            body: 'name=' + encodeURIComponent(name)
+                        }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
+                            if (data.status === 'duplicate') {{
+                                alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
+                            }} else {{
+                                input.value = '';
+                            }}
+                        }}).catch(function() {{}});
+                        return false;
+                    }}
+                </script>
             </div>
             {upcoming_html}
         </div>
@@ -1676,12 +1737,21 @@ def admin_status_resume_round(db: Session = Depends(get_db), _auth: None = Depen
     setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
 
     if state.is_paused and setting and state.paused_remaining_seconds is not None:
-        mm, ss = map(int, setting.round_duration.split(":"))
-        duration_seconds = mm * 60 + ss
-        elapsed_before_pause = duration_seconds - state.paused_remaining_seconds
-        state.round_started_at = now_jst() - timedelta(seconds=elapsed_before_pause)
-        state.is_paused = False
-        state.paused_remaining_seconds = None
+        if state.paused_remaining_seconds <= 0:
+            # 時間切れの状態で「いいえ」を押して一時停止していた場合、再開は
+            # 同じラウンドを0秒から動かすのではなく、そのまま次のラウンドへ進む
+            state.current_round += 1
+            state.is_running = True
+            state.round_started_at = now_jst()
+            state.is_paused = False
+            state.paused_remaining_seconds = None
+        else:
+            mm, ss = map(int, setting.round_duration.split(":"))
+            duration_seconds = mm * 60 + ss
+            elapsed_before_pause = duration_seconds - state.paused_remaining_seconds
+            state.round_started_at = now_jst() - timedelta(seconds=elapsed_before_pause)
+            state.is_paused = False
+            state.paused_remaining_seconds = None
         db.commit()
 
     return RedirectResponse(url="/admin/status", status_code=303)
