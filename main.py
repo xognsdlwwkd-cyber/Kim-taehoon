@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.9"
+APP_VERSION = "1.0.10"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -299,7 +299,7 @@ def time_picker(name: str, first_default: int = 19, second_default: int = 0,
 
 def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool = False,
               admin_round_watcher: bool = False, member_qr_size: int = 80, wide: bool = False,
-              initial_round: int = None, initial_paused: bool = None) -> HTMLResponse:
+              initial_round: int = None, initial_paused: bool = None, initial_running: bool = None) -> HTMLResponse:
     back_button_js = f"location.href='{back_url}'" if back_url else "history.back()"
     card_max_width = "1300px" if wide else "600px"
     member_qr_html = f"""
@@ -335,6 +335,7 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
     <script>
         window.__initialRound = {initial_round if initial_round is not None else 'null'};
         window.__initialPaused = {'true' if initial_paused else ('false' if initial_paused is not None else 'null')};
+        window.__initialRunning = {'true' if initial_running else ('false' if initial_running is not None else 'null')};
     </script>
     """ if admin_round_watcher else ""
     round_watcher_html = initial_state_js + """
@@ -349,7 +350,9 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         </div>
     </div>
     <script>
+        let breakCountdownInterval;
         function advanceRoundFromWatcher() {
+            if (breakCountdownInterval) clearInterval(breakCountdownInterval);
             fetch('/admin/status/next_round', { method: 'POST' }).then(function() {
                 document.getElementById('round-watch-popup').style.display = 'none';
             }).catch(function() {});
@@ -361,6 +364,7 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
             const onStatusPage = window.location.pathname === '/admin/status';
             let lastRound = (typeof window.__initialRound === 'number') ? window.__initialRound : null;
             let lastPaused = (typeof window.__initialPaused === 'boolean') ? window.__initialPaused : null;
+            let lastRunning = (typeof window.__initialRunning === 'boolean') ? window.__initialRunning : null;
             function pollRoundStatus() {
                 fetch('/admin/status/poll').then(function(r) { return r.json(); }).then(function(data) {
                     if (!data.has_session) return;
@@ -368,7 +372,8 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                         if (lastRound === null) {
                             lastRound = data.current_round;
                             lastPaused = data.is_paused;
-                        } else if (data.current_round !== lastRound || data.is_paused !== lastPaused) {
+                            lastRunning = data.is_running;
+                        } else if (data.current_round !== lastRound || data.is_paused !== lastPaused || data.is_running !== lastRunning) {
                             window.location.reload();
                             return;
                         }
@@ -386,6 +391,14 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                             document.getElementById('round-watch-title').innerText = 'ラウンド' + data.current_round + '終了！';
                             document.getElementById('round-watch-next-pairs').innerHTML = data.next_pairs_html;
                             document.getElementById('round-watch-popup').style.display = 'block';
+                            let remainingBreak = data.break_duration_seconds || 30;
+                            breakCountdownInterval = setInterval(function() {
+                                remainingBreak -= 1;
+                                if (remainingBreak <= 0) {
+                                    clearInterval(breakCountdownInterval);
+                                    advanceRoundFromWatcher();
+                                }
+                            }, 1000);
                         }
                     }
                 }).catch(function() {});
@@ -721,15 +734,36 @@ def member_register_join_page():
     return html_page("スパーリング参加確認", body)
 
 
+MEMBER_NAME_FORM_SCRIPT = """
+<script>
+    function submitMemberNameForm(event, form) {
+        event.preventDefault();
+        const data = new URLSearchParams(new FormData(form));
+        fetch('/member/register/name', { method: 'POST', body: data })
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+                if (res.status === 'duplicate') {
+                    alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
+                } else {
+                    window.location.href = res.redirect;
+                }
+            }).catch(function() {});
+        return false;
+    }
+</script>
+"""
+
+
 def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: str = None) -> str:
     if on_time == "yes":
         return f"""
-        <form action="/member/register/name" method="post">
+        <form onsubmit="return submitMemberNameForm(event, this)">
             <input type="hidden" name="on_time" value="yes" />
             名前（重複不可）<span class="btn-sub" style="display:inline;">(Name, must be unique)</span>:
             <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
             <button type="submit">登録<span class="btn-sub">Register</span></button>
         </form>
+        {MEMBER_NAME_FORM_SCRIPT}
         """
     now = now_jst()
     default_hour = int(late_time_a) if late_time_a else now.hour
@@ -738,7 +772,7 @@ def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: s
     if default_hour < now.hour or (default_hour == now.hour and default_minute < now.minute):
         default_hour, default_minute = now.hour, now.minute
     return f"""
-    <form action="/member/register/name" method="post">
+    <form onsubmit="return submitMemberNameForm(event, this)">
         <input type="hidden" name="on_time" value="no" />
         何時に来ますか？<span class="btn-sub" style="display:inline;">What time will you arrive?</span><br>
         {time_picker("late_time", first_default=default_hour, second_default=default_minute,
@@ -748,6 +782,7 @@ def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: s
         <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">登録<span class="btn-sub">Register</span></button>
     </form>
+    {MEMBER_NAME_FORM_SCRIPT}
     """
 
 
@@ -767,11 +802,7 @@ def member_register_name(
 ):
     existing = db.query(Member).filter(Member.name == name).first()
     if existing:
-        form_html = member_name_entry_form(on_time, late_time_a, late_time_b)
-        return html_page("スパー参加登録", f"""
-        <script>alert("この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish");</script>
-        {form_html}
-        """, back_url="/member/register")
+        return JSONResponse({"status": "duplicate"})
     member = Member(name=name)
     db.add(member)
     db.commit()
@@ -791,7 +822,7 @@ def member_register_name(
     if on_time == "no":
         insert_late_joiner_priority(db, member.id, today_jst())
 
-    return RedirectResponse(url=f"/?registered={quote(member.name)}", status_code=303)
+    return JSONResponse({"status": "ok", "redirect": f"/?registered={quote(member.name)}"})
 
 
 # -----------------------
@@ -1031,7 +1062,7 @@ def admin_home(db: Session = Depends(get_db), _auth: None = Depends(require_admi
     <a href="/admin/setup" class="link-btn">設定 (Set up)</a><br><br>
     {generate_link}
     """
-    return html_page("インストラクターページ", body, back_url="/", show_member_qr=True, admin_round_watcher=True)
+    return html_page("インストラクターページ", body, back_url="/", admin_round_watcher=True)
 
 
 def render_round_groups(db: Session, group_list) -> str:
@@ -1083,12 +1114,9 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
         )
         for ts in members_today
     )
-    if not grid_html:
-        grid_html = "<p>まだ参加者がいません。</p>"
-
     body = f"""
     <h2>本日の参加者</h2>
-    <p id="participant-count" style="color:#666; margin-top:-8px;">Total applicants: {len(members_today)}名</p>
+    <p id="participant-count" style="color:#666; margin-top:-8px;">{len(members_today):02d}名</p>
     <form id="add-form" onsubmit="return submitAddParticipant(event, this)" style="margin-bottom:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
@@ -1125,10 +1153,10 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
             function refreshParticipants() {{
                 fetch('/admin/members/poll').then(function(r) {{ return r.json(); }}).then(function(data) {{
                     const countEl = document.getElementById('participant-count');
-                    if (countEl) countEl.innerText = 'Total applicants: ' + data.count + '名';
+                    if (countEl) countEl.innerText = String(data.count).padStart(2, '0') + '名';
                     const list = document.getElementById('participant-list');
                     if (data.members.length === 0) {{
-                        list.innerHTML = '<p>まだ参加者がいません。</p>';
+                        list.innerHTML = '';
                         return;
                     }}
                     list.innerHTML = data.members.map(function(m) {{
@@ -1148,7 +1176,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
         }})();
     </script>
     """
-    return html_page("本日の参加者確認", body, back_url="/admin", show_member_qr=True, admin_round_watcher=True)
+    return html_page("本日の参加者確認", body, back_url="/admin", admin_round_watcher=True)
 
 
 @app.get("/admin/members/poll")
@@ -1233,23 +1261,38 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         duration_m, duration_s = 3, 0
         break_m, break_s = 0, 30
 
+    # 現在の参加者数とペア数から、数学的に可能な最短の待機ラウンド数を計算して表示する
+    today = today_jst()
+    total_participants = db.query(TodaySparring).filter(TodaySparring.date == today).count()
+    play_slots = pairs_value * 2
+    if play_slots > 0 and total_participants > play_slots:
+        min_skip = -(-(total_participants - play_slots) // play_slots)
+    else:
+        min_skip = 0
+
     body = f"""
     <form action="/admin/setup" method="post">
         ペア数 (Number of Pairs): <input type="number" name="number_of_pairs" value="{pairs_value}" /><br><br>
-        ラウンド時間 (Round duration):<br>
-        {time_picker("round_duration", first_default=duration_m, second_default=duration_s, first_max=10, first_label="分", second_label="秒")}
-        <br><br>
-        ラウンド数 (Number of Sparrings): <input type="number" name="number_of_rounds" value="{rounds_value}" /><br><br>
-        休憩時間 (Break between rounds):<br>
-        {time_picker("break_duration", first_default=break_m, second_default=break_s, first_max=10, first_label="分", second_label="秒")}
+        <div style="display:flex; gap:30px; flex-wrap:wrap;">
+            <div>
+                ラウンド時間 (Round duration):<br>
+                {time_picker("round_duration", first_default=duration_m, second_default=duration_s, first_max=10, first_label="分", second_label="秒")}
+            </div>
+            <div>
+                休憩時間 (Break between rounds):<br>
+                {time_picker("break_duration", first_default=break_m, second_default=break_s, first_max=10, first_label="分", second_label="秒")}
+            </div>
+        </div>
         <p style="font-size:14px;color:#666;">※ ラウンド終了後、この時間操作がなければ自動で次のラウンドに進みます。</p>
         <br>
-        スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" value="{skip_value}" /><br>
+        ラウンド数 (Number of Sparrings): <input type="number" name="number_of_rounds" value="{rounds_value}" /><br><br>
+        スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" value="{skip_value}" />
+        <span class="btn-sub" style="display:inline;">現在{total_participants}名・{pairs_value}ペアでの理論上の最短待機: {min_skip}<br>Theoretical minimum with {total_participants} people / {pairs_value} pairs: {min_skip}</span><br>
         <p style="font-size:14px;color:#666;">※ この回数を超えて連続で待機させないよう、優先的に組み合わせます。</p>
         <button type="submit">保存</button>
     </form>
     """
-    return html_page("設定ページ", body, back_url="/admin", show_member_qr=True, admin_round_watcher=True)
+    return html_page("設定ページ", body, back_url="/admin", admin_round_watcher=True)
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
@@ -1458,7 +1501,7 @@ def admin_generate_groups(db: Session = Depends(get_db), _auth: None = Depends(r
 
     participants = db.query(TodaySparring).filter(TodaySparring.date == today).all()
     if not participants:
-        return html_page("エラー", "本日の参加者がいません。", back_url="/admin", show_member_qr=True)
+        return html_page("エラー", "本日の参加者がいません。", back_url="/admin")
 
     member_ids_sorted = sorted(set(p.member_id for p in participants))
     arrival_dt = {p.member_id: member_arrival_dt(p.join_type, p.late_time, today) for p in participants}
@@ -1489,7 +1532,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
 
     if not groups:
         body = "<h2>スパーリング状況</h2><p>まだ組み合わせがありません。</p>"
-        return html_page("スパーリング状況", body, back_url="/admin", show_member_qr=True, member_qr_size=180)
+        return html_page("スパーリング状況", body, back_url="/admin", member_qr_size=180)
 
     total_rounds = setting.number_of_rounds if setting else 0
     state = get_or_create_state(db, today)
@@ -1697,7 +1740,6 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
 
     body = f"""
     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
-        <button onclick="toggleMemberQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替</button>
         <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
     {share_link_script}
@@ -1740,8 +1782,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
     {popups_html}
     """
 
-    return html_page("スパーリング状況", body, back_url="/admin", show_member_qr=True, member_qr_size=180, wide=True,
-                      admin_round_watcher=True, initial_round=state.current_round, initial_paused=state.is_paused)
+    return html_page("スパーリング状況", body, back_url="/admin", member_qr_size=180, wide=True,
+                      admin_round_watcher=True, initial_round=state.current_round, initial_paused=state.is_paused,
+                      initial_running=state.is_running)
 
 
 @app.get("/admin/status/poll")
@@ -1760,6 +1803,8 @@ def admin_status_poll(db: Session = Depends(get_db), _auth: None = Depends(requi
 
     mm, ss = map(int, setting.round_duration.split(":"))
     round_duration_seconds = mm * 60 + ss
+    bm, bs = map(int, (setting.break_duration or "00:30").split(":"))
+    break_duration_seconds = bm * 60 + bs
 
     next_round_num = state.current_round + 1
     next_round_groups = [g for g in groups if g.round_number == next_round_num]
@@ -1780,6 +1825,7 @@ def admin_status_poll(db: Session = Depends(get_db), _auth: None = Depends(requi
         "is_paused": state.is_paused,
         "round_started_at": (state.round_started_at.isoformat() + "+09:00") if state.round_started_at else None,
         "round_duration_seconds": round_duration_seconds,
+        "break_duration_seconds": break_duration_seconds,
         "next_pairs_html": next_pairs_html
     })
 
