@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.20"
+APP_VERSION = "1.0.22"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -318,7 +318,8 @@ def time_picker(name: str, first_default: int = 19, second_default: int = 0,
 
 def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool = False,
               admin_round_watcher: bool = False, member_qr_size: int = 80, wide: bool = False,
-              initial_round: int = None, initial_paused: bool = None, initial_running: bool = None) -> HTMLResponse:
+              initial_round: int = None, initial_paused: bool = None, initial_running: bool = None,
+              footer_button: str = None) -> HTMLResponse:
     back_button_js = f"location.href='{back_url}'" if back_url else "history.back()"
     card_max_width = "1300px" if wide else "600px"
     member_qr_html = f"""
@@ -623,7 +624,10 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         <div class="card">
             {body}
             <br>
-            <button onclick="{back_button_js}" style="background:#999;">戻る</button>
+            <div style="display:flex; gap:10px; justify-content:center;">
+                {footer_button or ""}
+                <button onclick="{back_button_js}" style="background:#999;">戻る</button>
+            </div>
         </div>
         {round_watcher_html}
         <div style="margin-top:20px; font-size:11px; color:#aaa;">v{APP_VERSION}</div>
@@ -995,6 +999,10 @@ def member_edit_time_save(
     ts.late_time = f"{late_time_a}:{late_time_b}"
     db.commit()
 
+    # 到着予定時刻が変わったので、その人が含まれるペアだけを直接組み直す
+    # （他の人の組み合わせには触れず、混乱させない）
+    fix_pairs_for_late_change(db, member_id, today)
+
     body = f"""
     <p>{ts.member.name} さんのスパー参加時間を更新しました。</p>
     <a href="/" class="link-btn">トップに戻る</a>
@@ -1324,7 +1332,7 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         min_skip = 0
 
     body = f"""
-    <form action="/admin/setup" method="post">
+    <form id="setup-form" action="/admin/setup" method="post">
         ペア数 (Number of Pairs): <input type="number" name="number_of_pairs" id="pairs_input" value="{pairs_value}" oninput="updateMinSkipHint()" /><br><br>
         <div style="display:flex; gap:30px; flex-wrap:wrap; justify-content:center;">
             <div>
@@ -1345,7 +1353,6 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
             <p id="min-skip-hint" class="btn-sub" style="margin-top:4px;"></p>
         </div>
         <p style="font-size:14px;color:#666;">※ この回数を超えて連続で待機させないよう、優先的に組み合わせます。</p>
-        <button type="submit">保存</button>
     </form>
     <script>
         const totalParticipants = {total_participants};
@@ -1376,7 +1383,8 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         updateMinSkipHint();
     </script>
     """
-    return html_page("設定ページ", body, back_url="/admin", admin_round_watcher=True)
+    return html_page("設定ページ", body, back_url="/admin", admin_round_watcher=True,
+                      footer_button='<button type="submit" form="setup-form">保存</button>')
 
 
 @app.post("/admin/setup", response_class=HTMLResponse)
@@ -1471,6 +1479,72 @@ def member_arrival_dt(join_type: str, late_time: str, today: date):
         return None
     h, m = map(int, late_time.split(":"))
     return datetime.combine(today, datetime.min.time()).replace(hour=h, minute=m)
+
+
+def fix_pairs_for_late_change(db: Session, member_id: int, today: date):
+    # 到着予定時刻の変更で間に合わなくなったペアだけを、その本人の枠だけ
+    # 待機者と直接入れ替える。他の人の組み合わせには一切触れない。
+    setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
+    state = db.query(SparringState).filter(SparringState.date == today).first()
+    if not setting or not state:
+        return
+
+    ts = db.query(TodaySparring).filter(
+        TodaySparring.member_id == member_id, TodaySparring.date == today
+    ).first()
+    if not ts:
+        return
+    arrival = member_arrival_dt(ts.join_type, ts.late_time, today)
+    if arrival is None:
+        return
+
+    current_round = state.current_round
+    locked_until = current_round + 3
+    duration_seconds = parse_duration_seconds(setting.round_duration)
+    base_time = now_jst()
+
+    active_ids = set(
+        mid for (mid,) in db.query(TodaySparring.member_id).filter(TodaySparring.date == today).all()
+    )
+
+    pairs = db.query(SparringGroup).filter(
+        SparringGroup.date == today,
+        SparringGroup.is_waiting == False,
+        SparringGroup.round_number > locked_until,
+        or_(SparringGroup.member_a_id == member_id, SparringGroup.member_b_id == member_id)
+    ).all()
+
+    for pair in pairs:
+        round_num = pair.round_number
+        round_start = base_time + timedelta(seconds=(round_num - (locked_until + 1)) * duration_seconds)
+        if arrival <= round_start:
+            continue  # 間に合うのでそのまま
+
+        waiting_row = db.query(SparringGroup).filter(
+            SparringGroup.date == today,
+            SparringGroup.round_number == round_num,
+            SparringGroup.is_waiting == True,
+            SparringGroup.waiting_member_id.in_(active_ids)
+        ).first()
+
+        if not waiting_row:
+            remaining_id = pair.member_b_id if pair.member_a_id == member_id else pair.member_a_id
+            db.add(SparringGroup(
+                round_number=round_num, pair_number=0,
+                waiting_member_id=remaining_id, is_waiting=True,
+                remaining_time=pair.remaining_time, date=today
+            ))
+            db.delete(pair)
+            continue
+
+        new_id = waiting_row.waiting_member_id
+        db.delete(waiting_row)
+        if pair.member_a_id == member_id:
+            pair.member_a_id = new_id
+        else:
+            pair.member_b_id = new_id
+
+    db.commit()
 
 
 def generate_round_range(db: Session, today: date, setting: SparringSettings,
