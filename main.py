@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.18"
+APP_VERSION = "1.0.19"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -652,30 +652,6 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <div style="display:flex; gap:8px; justify-content:center; margin-bottom:8px; flex-wrap:wrap;">
-        <button onclick="setPreviewMode('tablet')" id="btn-preview-tablet" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">タブレット表示</button>
-        <button onclick="setPreviewMode('mobile')" id="btn-preview-mobile" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">モバイル表示</button>
-        <button onclick="setPreviewMode('normal')" id="btn-preview-normal" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">標準に戻す</button>
-    </div>
-    <script>
-        function setPreviewMode(mode) {{
-            const card = document.querySelector('.card');
-            if (!card) return;
-            if (mode === 'tablet') {{
-                card.style.maxWidth = '768px';
-                card.style.border = '8px solid #333';
-                card.style.borderRadius = '24px';
-            }} else if (mode === 'mobile') {{
-                card.style.maxWidth = '375px';
-                card.style.border = '10px solid #333';
-                card.style.borderRadius = '32px';
-            }} else {{
-                card.style.maxWidth = '';
-                card.style.border = '';
-                card.style.borderRadius = '';
-            }}
-        }}
-    </script>
     <div style="display:flex; gap:8px; justify-content:center; margin-bottom:16px;">
         <button onclick="toggleQrPopup()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
         <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
@@ -759,7 +735,7 @@ def welcome(registered: str = None):
             }}, 3000);
         </script>
         """
-    return html_page("Welcome to the CAVE Expert Class", body)
+    return html_page("Welcome to the Cave Friday Sparring Class", body)
 
 
 @app.get("/qr/member")
@@ -1835,7 +1811,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
     """
 
     body = f"""
-    <div id="status-qr-box" style="text-align:center; margin-bottom:10px;">
+    <div id="status-qr-box" style="text-align:center; margin-bottom:10px; display:none;">
         <img src="/qr/member" width="120" height="120" alt="Member QR" style="border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
     </div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:8px;">
