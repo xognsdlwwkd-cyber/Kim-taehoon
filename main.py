@@ -710,7 +710,7 @@ def welcome(registered: str = None):
 
 @app.get("/qr/member")
 def qr_member():
-    return qr_image_response(f"{get_base_url()}/member/register")
+    return qr_image_response(f"{get_base_url()}/")
 
 
 @app.get("/qr/instructor")
