@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.13"
+APP_VERSION = "1.0.14"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -637,8 +637,17 @@ def welcome(registered: str = None):
     <div style="text-align:center; margin-bottom:16px;">
         <img src="/qr/member" width="160" height="160" alt="Member QR" style="border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
         <div style="display:flex; gap:8px; justify-content:center; margin-top:10px;">
-            <button onclick="shareQrImage()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+            <button onclick="document.getElementById('qr-share-popup').style.display='block'" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
             <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
+        </div>
+    </div>
+    <div class="popup-overlay" id="qr-share-popup">
+        <div class="popup-box">
+            <img src="/qr/member" width="220" height="220" alt="Member QR" style="border-radius:8px;" />
+            <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="shareQrImage()">共有<span class="btn-sub">Share</span></button>
+                <button onclick="document.getElementById('qr-share-popup').style.display='none'" style="background:#999;">閉じる<span class="btn-sub">Close</span></button>
+            </div>
         </div>
     </div>
     <script>
@@ -1063,10 +1072,10 @@ def admin_home(db: Session = Depends(get_db), _auth: None = Depends(require_admi
         generate_link = (
             '<a class="link-btn" href="/admin/generate" '
             'onclick="return confirm(\'スパーリングを再生成すると、現在の進行状況がリセットされます。よろしいですか？\')">'
-            'スパーリング開始 (Join the Sparring)</a>'
+            'スパーリング開始 (Start the Sparring)</a>'
         )
     else:
-        generate_link = '<a class="link-btn" href="/admin/generate">スパーリング開始 (Join the Sparring)</a>'
+        generate_link = '<a class="link-btn" href="/admin/generate">スパーリング開始 (Start the Sparring)</a>'
 
     body = f"""
     <p style="color:#666;">本日の参加者数: {total_today} 名</p>
@@ -1298,13 +1307,17 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         <p style="font-size:14px;color:#666;">※ ラウンド終了後、この時間操作がなければ自動で次のラウンドに進みます。</p>
         <br>
         ラウンド数 (Number of Sparrings): <input type="number" name="number_of_rounds" value="{rounds_value}" /><br><br>
-        スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" id="skip_input" value="{skip_value}" oninput="updateMinSkipHint()" />
-        <span id="min-skip-hint" class="btn-sub" style="display:inline;"></span>
+        <div style="text-align:center;">
+            スパーリングスキップ (最大連続待機ラウンド数):<br>
+            <select name="max_skip_rounds" id="skip_input" style="margin-top:6px;"></select>
+            <p id="min-skip-hint" class="btn-sub" style="margin-top:4px;"></p>
+        </div>
         <p style="font-size:14px;color:#666;">※ この回数を超えて連続で待機させないよう、優先的に組み合わせます。</p>
         <button type="submit">保存</button>
     </form>
     <script>
         const totalParticipants = {total_participants};
+        const savedSkipValue = {skip_value};
         function updateMinSkipHint() {{
             const pairs = parseInt(document.getElementById('pairs_input').value, 10) || 0;
             const slots = pairs * 2;
@@ -1312,10 +1325,20 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
             if (slots > 0 && totalParticipants > slots) {{
                 minSkip = Math.ceil((totalParticipants - slots) / slots);
             }}
-            const el = document.getElementById('min-skip-hint');
-            if (el) {{
-                el.innerText = '現在' + totalParticipants + '名・' + pairs + 'ペアでの理論上の最短待機: ' + minSkip +
-                    ' / Theoretical minimum with ' + totalParticipants + ' people / ' + pairs + ' pairs: ' + minSkip;
+            const hintEl = document.getElementById('min-skip-hint');
+            if (hintEl) {{
+                hintEl.innerText = '現在' + totalParticipants + '名・' + pairs + 'ペアでの理論上の最短待機: ' + minSkip;
+            }}
+            // 理論上の最短待機を下回る値は選べないようにする（ドロップダウンで固定）
+            const selectEl = document.getElementById('skip_input');
+            if (selectEl) {{
+                const current = selectEl.value ? parseInt(selectEl.value, 10) : savedSkipValue;
+                const keep = Math.max(current, minSkip);
+                let html = '';
+                for (let v = minSkip; v <= minSkip + 10; v++) {{
+                    html += '<option value="' + v + '"' + (v === keep ? ' selected' : '') + '>' + v + '</option>';
+                }}
+                selectEl.innerHTML = html;
             }}
         }}
         updateMinSkipHint();
@@ -1571,10 +1594,11 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
         mm, ss = map(int, setting.round_duration.split(":"))
         round_duration_seconds = mm * 60 + ss
         per_round = timedelta(minutes=mm, seconds=ss)
-        session_complete_time = now_jst() + per_round * setting.number_of_rounds
         remaining_rounds = max(total_rounds - state.current_round + 1, 0)
         info_html += f"<p>残りラウンド数: {remaining_rounds} ラウンド</p>"
-        info_html += f"<p>セッション終了予定時刻: {session_complete_time.strftime('%H:%M')}</p>"
+        if remaining_rounds > 0:
+            session_complete_time = now_jst() + per_round * remaining_rounds
+            info_html += f"<p>セッション終了予定時刻: {session_complete_time.strftime('%H:%M')}</p>"
         bm, bs = map(int, (setting.break_duration or "00:30").split(":"))
         break_duration_seconds = bm * 60 + bs
     else:
@@ -1764,11 +1788,20 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 alert('共有機能が使えません。リンク:\\nShare unavailable. Link:\\n' + window.location.href);
             }
         }
+        function toggleStatusQr() {
+            const box = document.getElementById('status-qr-box');
+            if (!box) return;
+            box.style.display = (box.style.display === 'none') ? '' : 'none';
+        }
     </script>
     """
 
     body = f"""
-    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+    <div id="status-qr-box" style="text-align:center; margin-bottom:10px;">
+        <img src="/qr/member" width="120" height="120" alt="Member QR" style="border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:8px;">
+        <button onclick="toggleStatusQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替<span class="btn-sub">Toggle QR</span></button>
         <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
     {share_link_script}
@@ -1785,6 +1818,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                     <button type="submit">追加</button>
                 </form>
                 <script>
+                    const statusPairsValue = {setting.number_of_pairs if setting else 0};
                     function submitAddParticipantStatus(event, form) {{
                         event.preventDefault();
                         const input = form.querySelector('input[name="name"]');
@@ -1799,9 +1833,20 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                                 alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
                             }} else {{
                                 input.value = '';
+                                showMinSkipToast(data.count);
                             }}
                         }}).catch(function() {{}});
                         return false;
+                    }}
+                    function showMinSkipToast(count) {{
+                        const slots = statusPairsValue * 2;
+                        if (slots <= 0 || count <= slots) return;
+                        const minSkip = Math.ceil((count - slots) / slots);
+                        const toast = document.createElement('div');
+                        toast.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:10px 18px; border-radius:8px; font-size:14px; z-index:3000;';
+                        toast.innerText = '理論上の最短待機ラウンド数: ' + minSkip;
+                        document.body.appendChild(toast);
+                        setTimeout(function() {{ toast.remove(); }}, 5000);
                     }}
                 </script>
             </div>
