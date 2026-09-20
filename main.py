@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.8"
+APP_VERSION = "1.0.9"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -298,7 +298,8 @@ def time_picker(name: str, first_default: int = 19, second_default: int = 0,
 # -----------------------
 
 def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool = False,
-              admin_round_watcher: bool = False, member_qr_size: int = 80, wide: bool = False) -> HTMLResponse:
+              admin_round_watcher: bool = False, member_qr_size: int = 80, wide: bool = False,
+              initial_round: int = None, initial_paused: bool = None) -> HTMLResponse:
     back_button_js = f"location.href='{back_url}'" if back_url else "history.back()"
     card_max_width = "1300px" if wide else "600px"
     member_qr_html = f"""
@@ -330,7 +331,13 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         }}
     </script>
     """ if show_member_qr else ""
-    round_watcher_html = """
+    initial_state_js = f"""
+    <script>
+        window.__initialRound = {initial_round if initial_round is not None else 'null'};
+        window.__initialPaused = {'true' if initial_paused else ('false' if initial_paused is not None else 'null')};
+    </script>
+    """ if admin_round_watcher else ""
+    round_watcher_html = initial_state_js + """
     <div class="popup-overlay" id="round-watch-popup">
         <div class="popup-box">
             <p id="round-watch-title">ラウンド終了！</p>
@@ -349,9 +356,27 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         }
         (function() {
             let notified = false;
+            // スパーリング状況ページを見ている端末同士で、一時停止・再開・ラウンド進行を
+            // 数秒以内に同期する（他の管理ページでは邪魔になるので対象外）
+            const onStatusPage = window.location.pathname === '/admin/status';
+            let lastRound = (typeof window.__initialRound === 'number') ? window.__initialRound : null;
+            let lastPaused = (typeof window.__initialPaused === 'boolean') ? window.__initialPaused : null;
             function pollRoundStatus() {
                 fetch('/admin/status/poll').then(function(r) { return r.json(); }).then(function(data) {
-                    if (!data.has_session || notified) return;
+                    if (!data.has_session) return;
+                    if (onStatusPage) {
+                        if (lastRound === null) {
+                            lastRound = data.current_round;
+                            lastPaused = data.is_paused;
+                        } else if (data.current_round !== lastRound || data.is_paused !== lastPaused) {
+                            window.location.reload();
+                            return;
+                        }
+                        // スパーリング状況ページには専用の終了ポップアップが既にあるため、
+                        // ここでは同期のみ行い、別の通知は出さない
+                        return;
+                    }
+                    if (notified) return;
                     if (data.is_running && !data.is_paused && data.round_started_at) {
                         const startTime = new Date(data.round_started_at);
                         const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
@@ -575,6 +600,7 @@ def welcome(registered: str = None):
     body = f"""
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:16px;">
         <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
     <div class="popup-overlay" id="qr-share-popup">
         <div class="popup-box">
@@ -609,6 +635,20 @@ def welcome(registered: str = None):
                 alert('この端末では共有機能が使えないため、リンクをコピーしました。\\nCould not share directly, copied the link instead:\\n' + qrUrl);
             }} catch (e) {{
                 alert('この端末では共有機能が使えません。リンク: \\nShare is unavailable on this device. Link:\\n' + qrUrl);
+            }}
+        }}
+        async function sharePageLink() {{
+            try {{
+                if (navigator.share) {{
+                    await navigator.share({{ title: document.title, url: window.location.href }});
+                    return;
+                }}
+            }} catch (e) {{}}
+            try {{
+                await navigator.clipboard.writeText(window.location.href);
+                alert('リンクをコピーしました\\nLink copied:\\n' + window.location.href);
+            }} catch (e) {{
+                alert('共有機能が使えません。リンク:\\nShare unavailable. Link:\\n' + window.location.href);
             }}
         }}
     </script>
@@ -1700,7 +1740,8 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
     {popups_html}
     """
 
-    return html_page("スパーリング状況", body, back_url="/admin", show_member_qr=True, member_qr_size=180, wide=True)
+    return html_page("スパーリング状況", body, back_url="/admin", show_member_qr=True, member_qr_size=180, wide=True,
+                      admin_round_watcher=True, initial_round=state.current_round, initial_paused=state.is_paused)
 
 
 @app.get("/admin/status/poll")
