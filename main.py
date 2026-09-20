@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.14"
+APP_VERSION = "1.0.15"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -634,12 +634,9 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <div style="text-align:center; margin-bottom:16px;">
-        <img src="/qr/member" width="160" height="160" alt="Member QR" style="border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
-        <div style="display:flex; gap:8px; justify-content:center; margin-top:10px;">
-            <button onclick="document.getElementById('qr-share-popup').style.display='block'" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
-            <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
-        </div>
+    <div style="display:flex; gap:8px; justify-content:center; margin-bottom:16px;">
+        <button onclick="toggleQrPopup()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
     <div class="popup-overlay" id="qr-share-popup">
         <div class="popup-box">
@@ -651,6 +648,11 @@ def welcome(registered: str = None):
         </div>
     </div>
     <script>
+        function toggleQrPopup() {{
+            const popup = document.getElementById('qr-share-popup');
+            if (!popup) return;
+            popup.style.display = (popup.style.display === 'block') ? 'none' : 'block';
+        }}
         async function shareQrImage() {{
             const qrUrl = window.location.origin + '/qr/member';
             try {{
@@ -1294,7 +1296,7 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
     body = f"""
     <form action="/admin/setup" method="post">
         ペア数 (Number of Pairs): <input type="number" name="number_of_pairs" id="pairs_input" value="{pairs_value}" oninput="updateMinSkipHint()" /><br><br>
-        <div style="display:flex; gap:30px; flex-wrap:wrap;">
+        <div style="display:flex; gap:30px; flex-wrap:wrap; justify-content:center;">
             <div>
                 ラウンド時間 (Round duration):<br>
                 {time_picker("round_duration", first_default=duration_m, second_default=duration_s, first_max=10, first_label="分", second_label="秒")}
@@ -1615,14 +1617,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
 
         if not state.is_running:
             # 初回ラウンドのみ「Ready to go?」の確認が必要（2ラウンド目以降は自動開始）
-            settings_summary = (
-                f"ラウンド時間: {setting.round_duration}　"
-                f"ラウンド数: {setting.number_of_rounds}　"
-                f"ペア数: {setting.number_of_pairs}"
-                if setting else ""
-            )
-            left_html += f"""
-            <p style="font-size:14px;color:#666;">{settings_summary}</p>
+            left_html += """
             <form action="/admin/status/start_round" method="post">
                 <button type="submit">Start</button>
             </form>
@@ -1639,9 +1634,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             <p>一時停止中 - 残り時間: <span style='font-size:28px;font-weight:bold;'>{paused_m:02d}:{paused_s:02d}</span></p>
             <div style="display:flex; gap:8px;">
                 <form action="/admin/status/resume_round" method="post" style="margin:0;">
-                    <button type="submit" style="background:#4a90e2;">再開する (Resume)</button>
+                    <button type="submit" style="background:#4a90e2;">再開する</button>
                 </form>
-                <button type="button" onclick="handleSkipRound(true)" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
+                <button type="button" onclick="handleSkipRound(true)" style="background:#999;">スキップ</button>
             </div>
             <script>
                 function handleSkipRound(alreadyPaused) {{
@@ -1662,7 +1657,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <form action="/admin/status/pause_round" method="post" style="margin:0;">
                     <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
                 </form>
-                <button type="button" onclick="handleSkipRound(false)" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
+                <button type="button" onclick="handleSkipRound(false)" style="background:#999;">スキップ</button>
             </div>
             <script>
                 function handleSkipRound(alreadyPaused) {
