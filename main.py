@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -249,10 +249,29 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
     back_button_js = f"location.href='{back_url}'" if back_url else "history.back()"
     card_max_width = "1300px" if wide else "600px"
     member_qr_html = f"""
-    <div style="position:fixed; top:10px; right:10px; text-align:center; z-index:500;">
+    <div id="member-qr-box" style="position:fixed; top:10px; right:10px; text-align:center; z-index:500;">
         <img src="/qr/member" width="{member_qr_size}" height="{member_qr_size}" alt="Member QR" style="border-radius:6px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" /><br>
         <span style="font-size:11px; color:#999;">メンバー参加用</span>
     </div>
+    <script>
+        (function() {{
+            try {{
+                if (localStorage.getItem('member_qr_hidden') === '1') {{
+                    document.addEventListener('DOMContentLoaded', function() {{
+                        const box = document.getElementById('member-qr-box');
+                        if (box) box.style.display = 'none';
+                    }});
+                }}
+            }} catch (e) {{}}
+        }})();
+        function toggleMemberQr() {{
+            const box = document.getElementById('member-qr-box');
+            if (!box) return;
+            const hidden = box.style.display === 'none';
+            box.style.display = hidden ? '' : 'none';
+            try {{ localStorage.setItem('member_qr_hidden', hidden ? '0' : '1'); }} catch (e) {{}}
+        }}
+    </script>
     """ if show_member_qr else ""
     round_watcher_html = """
     <div class="popup-overlay" id="round-watch-popup">
@@ -311,7 +330,10 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                 margin-bottom: 20px;
             }}
             .card {{
-                background: white;
+                background-image: linear-gradient(rgba(255,255,255,0.9), rgba(255,255,255,0.9)), url('/static/welcome-bg.webp');
+                background-size: cover;
+                background-position: center;
+                background-color: white;
                 padding: 20px;
                 margin: 20px auto;
                 width: 80%;
@@ -485,30 +507,21 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <div style="background-image: linear-gradient(rgba(255,255,255,0.88), rgba(255,255,255,0.88)), url('/static/welcome-bg.webp');
-        background-size: cover; background-position: center; border-radius: 12px; padding: 20px; margin: -20px -20px 0;">
-        <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
-            <div style="text-align:center;">
-                <p style="font-weight:bold; color:#555; margin-bottom:8px;">Instructor</p>
-                <a href="/admin"><img src="/static/instructor-photo.png" alt="Instructor" width="150" height="150"
+    <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
+        <div style="text-align:center;">
+            <p style="font-weight:bold; color:#555; margin-bottom:8px;">Instructor</p>
+            <a href="/admin"><img src="/qr/instructor" width="110" height="110" alt="Instructor QR" /></a>
+            <div style="margin-top:14px;">
+                <a href="/admin"><img src="/static/instructor-photo.png" alt="Instructor" width="200" height="200"
                     style="object-fit:cover; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
-                <div style="margin-top:14px;">
-                    <a href="/admin"><img src="/qr/instructor" width="110" height="110" alt="Instructor QR" /></a>
-                </div>
-                <div style="margin-top:10px;">
-                    <a href="/admin" class="link-btn">インストラクターページ</a>
-                </div>
             </div>
-            <div style="text-align:center;">
-                <p style="font-weight:bold; color:#555; margin-bottom:8px;">Member</p>
-                <a href="/member/register"><img src="/static/member-icon.png" alt="Member" width="150" height="150"
-                    style="object-fit:contain; background:#f2f2f2; border-radius:12px; padding:15px; box-sizing:border-box; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
-                <div style="margin-top:14px;">
-                    <a href="/member/register"><img src="/qr/member" width="110" height="110" alt="Member QR" /></a>
-                </div>
-                <div style="margin-top:10px;">
-                    <a href="/member/register" class="link-btn">スパー参加登録<span class="btn-sub">Join Registration</span></a>
-                </div>
+        </div>
+        <div style="text-align:center;">
+            <p style="font-weight:bold; color:#555; margin-bottom:8px;">Member</p>
+            <a href="/member/register"><img src="/qr/member" width="110" height="110" alt="Member QR" /></a>
+            <div style="margin-top:14px;">
+                <a href="/member/register"><img src="/static/member-icon.png" alt="Member" width="200" height="200"
+                    style="object-fit:contain; background:#f2f2f2; border-radius:12px; padding:20px; box-sizing:border-box; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
             </div>
         </div>
     </div>
@@ -925,8 +938,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
         {grid_html}
     </div>
 
-    <h2>直接入力で追加 (Input Directly)</h2>
-    <form action="/admin/members/add" method="post">
+    <form action="/admin/members/add" method="post" style="margin-top:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
     </form>
@@ -1191,10 +1203,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 if setting else ""
             )
             left_html += f"""
-            <p>Ready to go?</p>
             <p style="font-size:14px;color:#666;">{settings_summary}</p>
             <form action="/admin/status/start_round" method="post">
-                <button type="submit">はい</button>
+                <button type="submit">Start</button>
             </form>
             """
             left_html += render_round_groups(db, current_groups)
@@ -1297,6 +1308,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             """
 
     body = f"""
+    <button onclick="toggleMemberQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替</button>
     {info_html}
     <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; text-align:left;">
         <div style="flex:1 1 300px; background:#dceeff; border-radius:12px; padding:16px;">
