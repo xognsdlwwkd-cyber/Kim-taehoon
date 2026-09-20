@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -371,7 +371,7 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                 margin-bottom: 20px;
             }}
             .card {{
-                background-image: linear-gradient(rgba(255,255,255,0.65), rgba(255,255,255,0.65)), url('/static/welcome-bg.webp');
+                background-image: linear-gradient(rgba(255,255,255,0.35), rgba(255,255,255,0.35)), url('/static/welcome-bg.webp');
                 background-size: cover;
                 background-position: center;
                 background-color: white;
@@ -689,6 +689,9 @@ def member_register_name(
     db.add(ts)
     db.commit()
 
+    if on_time == "no":
+        insert_late_joiner_priority(db, member.id, today_jst())
+
     return RedirectResponse(url=f"/?registered={quote(member.name)}", status_code=303)
 
 
@@ -987,6 +990,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
 
     body = f"""
     <h2>本日の参加者</h2>
+    <p id="participant-count" style="color:#666; margin-top:-8px;">Total applicants: {len(members_today)}名</p>
     <form action="/admin/members/add" method="post" style="margin-bottom:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
@@ -1003,6 +1007,8 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
             }}
             function refreshParticipants() {{
                 fetch('/admin/members/poll').then(function(r) {{ return r.json(); }}).then(function(data) {{
+                    const countEl = document.getElementById('participant-count');
+                    if (countEl) countEl.innerText = 'Total applicants: ' + data.count + '名';
                     const list = document.getElementById('participant-list');
                     if (data.members.length === 0) {{
                         list.innerHTML = '<p>まだ参加者がいません。</p>';
@@ -1067,23 +1073,28 @@ def admin_members_add(
     db: Session = Depends(get_db),
     _auth: None = Depends(require_admin)
 ):
+    today = today_jst()
     member = db.query(Member).filter(Member.name == name).first()
-    if not member:
+    if member:
+        existing_ts = db.query(TodaySparring).filter(
+            TodaySparring.member_id == member.id,
+            TodaySparring.date == today
+        ).first()
+        if existing_ts:
+            return HTMLResponse(f"""
+            <script>
+                alert("Your name is already enrolled, add more letters to distinguish");
+                window.location.href = "{next_url}";
+            </script>
+            """)
+    else:
         member = Member(name=name)
         db.add(member)
         db.commit()
         db.refresh(member)
 
-    today = today_jst()
-    ts = db.query(TodaySparring).filter(
-        TodaySparring.member_id == member.id,
-        TodaySparring.date == today
-    ).first()
-
-    if not ts:
-        ts = TodaySparring(member_id=member.id, date=today, joined_at=now_jst())
-        db.add(ts)
-
+    ts = TodaySparring(member_id=member.id, date=today, joined_at=now_jst())
+    db.add(ts)
     ts.join_type = "on_time"
     ts.late_time = None
     db.commit()
@@ -1197,6 +1208,113 @@ def resolve_pairs_after_absence(db: Session, absent_member_id: int, today: date)
     db.commit()
 
 
+def parse_duration_seconds(duration_str: str) -> int:
+    mm, ss = map(int, duration_str.split(":"))
+    return mm * 60 + ss
+
+
+def member_arrival_dt(join_type: str, late_time: str, today: date):
+    # 定時参加なら常に対戦可能。遅刻の場合は到着予定時刻より前のラウンドには入れない。
+    if join_type != "late" or not late_time or ":" not in late_time:
+        return None
+    h, m = map(int, late_time.split(":"))
+    return datetime.combine(today, datetime.min.time()).replace(hour=h, minute=m)
+
+
+def generate_round_range(db: Session, today: date, setting: SparringSettings,
+                          member_ids: list, arrival_dt: dict, waiting_streak: dict,
+                          paired_history: set, base_time: datetime, from_round: int, to_round: int):
+    duration_seconds = parse_duration_seconds(setting.round_duration)
+    play_slots = setting.number_of_pairs * 2
+
+    for round_num in range(from_round, to_round + 1):
+        round_start = base_time + timedelta(seconds=(round_num - from_round) * duration_seconds)
+        # まだ到着予定時刻前の遅刻者は、そのラウンドの組み合わせに一切登場させない
+        eligible = [
+            mid for mid in member_ids
+            if arrival_dt.get(mid) is None or arrival_dt[mid] <= round_start
+        ]
+        # 待機が長い人ほど優先的に対戦させる（同点は元の並び順で安定ソート）
+        order = sorted(eligible, key=lambda mid: -waiting_streak[mid])
+        playing_pool = order[:play_slots]
+        waiting = order[play_slots:]
+
+        # 優先順位を保ちつつ、なるべく初対戦の相手を選んで同じペアの繰り返しを避ける
+        remaining = list(playing_pool)
+        pair_num = 1
+        while len(remaining) >= 2:
+            a = remaining.pop(0)
+            partner_idx = 0
+            for i, b in enumerate(remaining):
+                if frozenset((a, b)) not in paired_history:
+                    partner_idx = i
+                    break
+            b = remaining.pop(partner_idx)
+            paired_history.add(frozenset((a, b)))
+            db.add(SparringGroup(
+                round_number=round_num, pair_number=pair_num,
+                member_a_id=a, member_b_id=b, is_waiting=False,
+                remaining_time=setting.round_duration, date=today
+            ))
+            waiting_streak[a] = 0
+            waiting_streak[b] = 0
+            pair_num += 1
+
+        # ペアを組めなかった余り1人がいれば待機扱い
+        waiting = remaining + waiting
+        for mid in waiting:
+            waiting_streak[mid] += 1
+            db.add(SparringGroup(
+                round_number=round_num, pair_number=0,
+                waiting_member_id=mid, is_waiting=True,
+                remaining_time=setting.round_duration, date=today
+            ))
+
+
+def insert_late_joiner_priority(db: Session, member_id: int, today: date):
+    # まだ組み合わせが生成されていなければ、次回の生成で自然に組み込まれる
+    if not db.query(SparringGroup).filter(SparringGroup.date == today).first():
+        return
+
+    setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
+    if not setting:
+        return
+
+    state = db.query(SparringState).filter(SparringState.date == today).first()
+    current_round = state.current_round if state else 1
+    # 画面に表示中の4ラウンド（現在＋次の3）はそのまま固定し、それより先だけ組み直す
+    locked_until = current_round + 3
+    from_round = locked_until + 1
+    if from_round > setting.number_of_rounds:
+        return
+
+    participants = db.query(TodaySparring).filter(TodaySparring.date == today).all()
+    member_ids_sorted = sorted(set(p.member_id for p in participants))
+    arrival_dt = {p.member_id: member_arrival_dt(p.join_type, p.late_time, today) for p in participants}
+
+    # これまでの対戦履歴は、これから消す画面外の分も含めて再利用する
+    paired_history = set()
+    for g in db.query(SparringGroup).filter(SparringGroup.date == today, SparringGroup.is_waiting == False).all():
+        if g.member_a_id and g.member_b_id:
+            paired_history.add(frozenset((g.member_a_id, g.member_b_id)))
+
+    db.query(SparringGroup).filter(
+        SparringGroup.date == today,
+        SparringGroup.round_number >= from_round
+    ).delete()
+
+    # 新しく来た人を最優先にし、それ以外は待機カウントをリセットして組み直す
+    waiting_streak = {mid: (10 ** 6 if mid == member_id else 0) for mid in member_ids_sorted}
+    duration_seconds = parse_duration_seconds(setting.round_duration)
+    base_time = now_jst() + timedelta(seconds=duration_seconds)
+
+    generate_round_range(
+        db, today, setting, member_ids_sorted, arrival_dt, waiting_streak,
+        paired_history, base_time=base_time, from_round=from_round, to_round=setting.number_of_rounds
+    )
+    db.commit()
+
+
 @app.get("/admin/generate", response_class=HTMLResponse)
 def admin_generate_groups(db: Session = Depends(get_db), _auth: None = Depends(require_admin)):
     today = today_jst()
@@ -1218,52 +1336,17 @@ def admin_generate_groups(db: Session = Depends(get_db), _auth: None = Depends(r
         return html_page("エラー", "本日の参加者がいません。", back_url="/admin", show_member_qr=True)
 
     member_ids_sorted = sorted(set(p.member_id for p in participants))
+    arrival_dt = {p.member_id: member_arrival_dt(p.join_type, p.late_time, today) for p in participants}
 
     db.query(SparringGroup).filter(SparringGroup.date == today).delete()
     db.commit()
 
-    # 連続で待機したラウンド数を記録し、長く待っている人を優先的に組み合わせる
     waiting_streak = {mid: 0 for mid in member_ids_sorted}
-    play_slots = setting.number_of_pairs * 2
-
-    for round_num in range(1, setting.number_of_rounds + 1):
-        # 待機が長い人ほど優先的に対戦させる（同点は元の並び順で安定ソート）
-        order = sorted(member_ids_sorted, key=lambda mid: -waiting_streak[mid])
-        playing = order[:play_slots]
-        waiting = order[play_slots:]
-
-        pair_num = 1
-        paired_count = (len(playing) // 2) * 2
-        for i in range(0, paired_count, 2):
-            group = SparringGroup(
-                round_number=round_num,
-                pair_number=pair_num,
-                member_a_id=playing[i],
-                member_b_id=playing[i + 1],
-                is_waiting=False,
-                remaining_time=setting.round_duration,
-                date=today
-            )
-            db.add(group)
-            pair_num += 1
-
-        # ペアを組めなかった余り1人がいれば待機扱い
-        leftover = playing[paired_count:]
-        waiting = leftover + waiting
-
-        for mid in playing[:paired_count]:
-            waiting_streak[mid] = 0
-        for mid in waiting:
-            waiting_streak[mid] += 1
-            group = SparringGroup(
-                round_number=round_num,
-                pair_number=0,
-                waiting_member_id=mid,
-                is_waiting=True,
-                remaining_time=setting.round_duration,
-                date=today
-            )
-            db.add(group)
+    paired_history = set()
+    generate_round_range(
+        db, today, setting, member_ids_sorted, arrival_dt, waiting_streak,
+        paired_history, base_time=now_jst(), from_round=1, to_round=setting.number_of_rounds
+    )
     db.commit()
 
     # 本日のラウンド進行状態をリセット
@@ -1330,18 +1413,28 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             paused_s = (state.paused_remaining_seconds or 0) % 60
             left_html += f"""
             <p>一時停止中 - 残り時間: <span style='font-size:28px;font-weight:bold;'>{paused_m:02d}:{paused_s:02d}</span></p>
-            <form action="/admin/status/resume_round" method="post">
-                <button type="submit" style="background:#4a90e2;">再開する (Resume)</button>
-            </form>
+            <div style="display:flex; gap:8px;">
+                <form action="/admin/status/resume_round" method="post" style="margin:0;">
+                    <button type="submit" style="background:#4a90e2;">再開する (Resume)</button>
+                </form>
+                <form action="/admin/status/next_round" method="post" style="margin:0;">
+                    <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
+                </form>
+            </div>
             """
             left_html += render_round_groups(db, current_groups)
 
         else:
             left_html += """
             <p>Remaining TIME: <span id='timer' style='font-size:28px;font-weight:bold;'>--:--</span></p>
-            <form action="/admin/status/pause_round" method="post">
-                <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
-            </form>
+            <div style="display:flex; gap:8px;">
+                <form action="/admin/status/pause_round" method="post" style="margin:0;">
+                    <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
+                </form>
+                <form action="/admin/status/next_round" method="post" style="margin:0;">
+                    <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
+                </form>
+            </div>
             """
             left_html += render_round_groups(db, current_groups)
 
@@ -1368,7 +1461,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                         <form action="/admin/status/next_round" method="post" style="margin:0;">
                             <button type="submit">Yes</button>
                         </form>
-                        <button onclick="document.getElementById('round-complete-popup').style.display='none'" style="background:#999;">No</button>
+                        <form action="/admin/status/pause_round" method="post" style="margin:0;">
+                            <button type="submit" style="background:#999;">No</button>
+                        </form>
                     </div>
                 </div>
             </div>
@@ -1421,23 +1516,70 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             </div>
             """
 
+    qr_share_html = """
+    <div class="popup-overlay" id="qr-share-popup">
+        <div class="popup-box">
+            <p>メンバー参加用QRコード<span class="btn-sub" style="display:block;">Member join QR code</span></p>
+            <img src="/qr/member" width="220" height="220" alt="Member QR" style="border-radius:8px;" />
+            <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
+                <button onclick="shareQrImage()">共有<span class="btn-sub">Share</span></button>
+                <button onclick="document.getElementById('qr-share-popup').style.display='none'" style="background:#999;">閉じる<span class="btn-sub">Close</span></button>
+            </div>
+        </div>
+    </div>
+    <script>
+        function openQrShareBox() {
+            document.getElementById('qr-share-popup').style.display = 'block';
+        }
+        async function shareQrImage() {
+            try {
+                const resp = await fetch('/qr/member');
+                const blob = await resp.blob();
+                const file = new File([blob], 'member-qr.png', { type: 'image/png' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: 'スパー参加用QRコード' });
+                } else if (navigator.share) {
+                    await navigator.share({ title: 'スパー参加用QRコード', url: window.location.origin + '/qr/member' });
+                } else {
+                    alert('この端末では共有機能が使えません。リンク: ' + window.location.origin + '/qr/member');
+                }
+            } catch (e) {}
+        }
+        async function sharePageLink() {
+            try {
+                if (navigator.share) {
+                    await navigator.share({ title: document.title, url: window.location.href });
+                } else {
+                    await navigator.clipboard.writeText(window.location.href);
+                    alert('リンクをコピーしました / Link copied');
+                }
+            } catch (e) {}
+        }
+    </script>
+    """
+
     body = f"""
-    <button onclick="toggleMemberQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替</button>
+    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+        <button onclick="toggleMemberQr()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコード表示切替</button>
+        <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
+    </div>
+    {qr_share_html}
     {info_html}
     <div style="display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; text-align:left;">
         <div style="flex:1 1 300px; background:#dceeff; border-radius:12px; padding:16px;">
             {left_html}
         </div>
         <div style="flex:1 1 300px;">
-            {upcoming_html}
-            <div style="margin-top:20px; padding:16px; background:#f2f2f2; border-radius:12px; text-align:left;">
-                <h4 style="margin:0 0 10px;">参加者を直接追加</h4>
+            <div style="padding:16px; background:#f2f2f2; border-radius:12px; text-align:left; margin-bottom:20px;">
+                <h4 style="margin:0 0 10px;">参加者を直接追加<span class="btn-sub" style="display:inline;">Add participant directly</span></h4>
                 <form action="/admin/members/add" method="post">
                     <input type="hidden" name="next_url" value="/admin/status" />
                     名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
                     <button type="submit">追加</button>
                 </form>
             </div>
+            {upcoming_html}
         </div>
     </div>
     {popups_html}
