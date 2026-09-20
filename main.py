@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.10"
+APP_VERSION = "1.0.11"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -343,22 +343,32 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         <div class="popup-box">
             <p id="round-watch-title">ラウンド終了！</p>
             <div id="round-watch-next-pairs"></div>
+            <p class="btn-sub" style="display:block;"><span id="round-watch-countdown"></span>秒操作がなければ自動で進みます</p>
             <div style="display:flex; gap:10px; justify-content:center;">
                 <button onclick="advanceRoundFromWatcher()">Yes</button>
-                <button onclick="document.getElementById('round-watch-popup').style.display='none'" style="background:#999;">No</button>
+                <button onclick="declineRoundFromWatcher()" style="background:#999;">No</button>
             </div>
         </div>
     </div>
     <script>
-        let breakCountdownInterval;
+        let breakCountdownInterval = null;
+        function stopWatcherCountdown() {
+            if (breakCountdownInterval) {
+                clearInterval(breakCountdownInterval);
+                breakCountdownInterval = null;
+            }
+            document.getElementById('round-watch-popup').style.display = 'none';
+        }
         function advanceRoundFromWatcher() {
-            if (breakCountdownInterval) clearInterval(breakCountdownInterval);
-            fetch('/admin/status/next_round', { method: 'POST' }).then(function() {
-                document.getElementById('round-watch-popup').style.display = 'none';
-            }).catch(function() {});
+            stopWatcherCountdown();
+            fetch('/admin/status/next_round', { method: 'POST' }).catch(function() {});
+        }
+        function declineRoundFromWatcher() {
+            // 「いいえ」は一時停止として扱い、他の端末のカウントダウンも同期して止める
+            stopWatcherCountdown();
+            fetch('/admin/status/pause_round', { method: 'POST' }).catch(function() {});
         }
         (function() {
-            let notified = false;
             // スパーリング状況ページを見ている端末同士で、一時停止・再開・ラウンド進行を
             // 数秒以内に同期する（他の管理ページでは邪魔になるので対象外）
             const onStatusPage = window.location.pathname === '/admin/status';
@@ -381,24 +391,36 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                         // ここでは同期のみ行い、別の通知は出さない
                         return;
                     }
-                    if (notified) return;
+                    // 誰かが既に一時停止・進行させた場合はポップアップとカウントダウンを止める
+                    if (data.is_paused || !data.is_running) {
+                        stopWatcherCountdown();
+                        return;
+                    }
                     if (data.is_running && !data.is_paused && data.round_started_at) {
                         const startTime = new Date(data.round_started_at);
                         const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
                         const remaining = data.round_duration_seconds - elapsed;
                         if (remaining <= 0) {
-                            notified = true;
                             document.getElementById('round-watch-title').innerText = 'ラウンド' + data.current_round + '終了！';
                             document.getElementById('round-watch-next-pairs').innerHTML = data.next_pairs_html;
                             document.getElementById('round-watch-popup').style.display = 'block';
-                            let remainingBreak = data.break_duration_seconds || 30;
-                            breakCountdownInterval = setInterval(function() {
-                                remainingBreak -= 1;
-                                if (remainingBreak <= 0) {
-                                    clearInterval(breakCountdownInterval);
-                                    advanceRoundFromWatcher();
-                                }
-                            }, 1000);
+                            // 既にカウントダウン中なら二重に始めない。他の端末が対応するまで繰り返し表示し続ける
+                            if (!breakCountdownInterval) {
+                                let remainingBreak = data.break_duration_seconds || 30;
+                                const el = document.getElementById('round-watch-countdown');
+                                if (el) el.innerText = remainingBreak;
+                                breakCountdownInterval = setInterval(function() {
+                                    remainingBreak -= 1;
+                                    if (el) el.innerText = Math.max(remainingBreak, 0);
+                                    if (remainingBreak <= 0) {
+                                        clearInterval(breakCountdownInterval);
+                                        breakCountdownInterval = null;
+                                        advanceRoundFromWatcher();
+                                    }
+                                }, 1000);
+                            }
+                        } else {
+                            stopWatcherCountdown();
                         }
                     }
                 }).catch(function() {});
@@ -611,24 +633,14 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:16px;">
-        <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
-        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
-    </div>
-    <div class="popup-overlay" id="qr-share-popup">
-        <div class="popup-box">
-            <p>メンバー参加用QRコード<span class="btn-sub" style="display:block;">Member join QR code</span></p>
-            <img src="/qr/member" width="220" height="220" alt="Member QR" style="border-radius:8px;" />
-            <div style="margin-top:16px; display:flex; gap:10px; justify-content:center;">
-                <button onclick="shareQrImage()">共有<span class="btn-sub">Share</span></button>
-                <button onclick="document.getElementById('qr-share-popup').style.display='none'" style="background:#999;">閉じる<span class="btn-sub">Close</span></button>
-            </div>
+    <div style="text-align:center; margin-bottom:16px;">
+        <img src="/qr/member" width="160" height="160" alt="Member QR" style="border-radius:8px; box-shadow:0 2px 6px rgba(0,0,0,0.15);" />
+        <div style="display:flex; gap:8px; justify-content:center; margin-top:10px;">
+            <button onclick="shareQrImage()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
+            <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
         </div>
     </div>
     <script>
-        function openQrShareBox() {{
-            document.getElementById('qr-share-popup').style.display = 'block';
-        }}
         async function shareQrImage() {{
             const qrUrl = window.location.origin + '/qr/member';
             try {{
@@ -914,20 +926,20 @@ def member_edit_time_select(name: str = Form(...), db: Session = Depends(get_db)
 
     body = f"""
     <p>{ts.member.name} さんのスパー参加時間を編集<span class="btn-sub" style="margin-top:4px;">Edit arrival time</span></p>
-    <form action="/member/register/edit_time/save" method="post">
+    <form id="edit-time-save-form" action="/member/register/edit_time/save" method="post">
         <input type="hidden" name="member_id" value="{member_id}" />
         何時に来ますか？<span class="btn-sub" style="display:inline;">What time will you arrive?</span><br>
         {time_picker("late_time", first_default=h_default, second_default=m_default,
                       min_hour=now.hour, min_minute=now.minute)}
-        <br><br>
-        <button type="submit">更新<span class="btn-sub">Update</span></button>
     </form>
-    <br>
-    <form action="/member/register/edit_time/cancel" method="post"
-        onsubmit="return confirm('本日の参加を取り消しますか？')">
-        <input type="hidden" name="member_id" value="{member_id}" />
-        <button type="submit" style="background:#c0392b;">不参加 (今日は行けません)<span class="btn-sub">Not attending today</span></button>
-    </form>
+    <div style="display:flex; gap:10px; justify-content:center; margin-top:16px;">
+        <button type="submit" form="edit-time-save-form">更新<span class="btn-sub">Update</span></button>
+        <form action="/member/register/edit_time/cancel" method="post"
+            onsubmit="return confirm('本日の参加を取り消しますか？')" style="margin:0;">
+            <input type="hidden" name="member_id" value="{member_id}" />
+            <button type="submit" style="background:#c0392b;">不参加 (今日は行けません)<span class="btn-sub">Not attending today</span></button>
+        </form>
+    </div>
     """
     return html_page("スパー参加時間を編集", body)
 
@@ -1115,8 +1127,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
         for ts in members_today
     )
     body = f"""
-    <h2>本日の参加者</h2>
-    <p id="participant-count" style="color:#666; margin-top:-8px;">{len(members_today):02d}名</p>
+    <h2 id="participant-count">{len(members_today):02d}名</h2>
     <form id="add-form" onsubmit="return submitAddParticipant(event, this)" style="margin-bottom:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
@@ -1272,7 +1283,7 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
 
     body = f"""
     <form action="/admin/setup" method="post">
-        ペア数 (Number of Pairs): <input type="number" name="number_of_pairs" value="{pairs_value}" /><br><br>
+        ペア数 (Number of Pairs): <input type="number" name="number_of_pairs" id="pairs_input" value="{pairs_value}" oninput="updateMinSkipHint()" /><br><br>
         <div style="display:flex; gap:30px; flex-wrap:wrap;">
             <div>
                 ラウンド時間 (Round duration):<br>
@@ -1286,11 +1297,28 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         <p style="font-size:14px;color:#666;">※ ラウンド終了後、この時間操作がなければ自動で次のラウンドに進みます。</p>
         <br>
         ラウンド数 (Number of Sparrings): <input type="number" name="number_of_rounds" value="{rounds_value}" /><br><br>
-        スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" value="{skip_value}" />
-        <span class="btn-sub" style="display:inline;">現在{total_participants}名・{pairs_value}ペアでの理論上の最短待機: {min_skip}<br>Theoretical minimum with {total_participants} people / {pairs_value} pairs: {min_skip}</span><br>
+        スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" id="skip_input" value="{skip_value}" oninput="updateMinSkipHint()" />
+        <span id="min-skip-hint" class="btn-sub" style="display:inline;"></span>
         <p style="font-size:14px;color:#666;">※ この回数を超えて連続で待機させないよう、優先的に組み合わせます。</p>
         <button type="submit">保存</button>
     </form>
+    <script>
+        const totalParticipants = {total_participants};
+        function updateMinSkipHint() {{
+            const pairs = parseInt(document.getElementById('pairs_input').value, 10) || 0;
+            const slots = pairs * 2;
+            let minSkip = 0;
+            if (slots > 0 && totalParticipants > slots) {{
+                minSkip = Math.ceil((totalParticipants - slots) / slots);
+            }}
+            const el = document.getElementById('min-skip-hint');
+            if (el) {{
+                el.innerText = '現在' + totalParticipants + '名・' + pairs + 'ペアでの理論上の最短待機: ' + minSkip +
+                    ' / Theoretical minimum with ' + totalParticipants + ' people / ' + pairs + ' pairs: ' + minSkip;
+            }}
+        }}
+        updateMinSkipHint();
+    </script>
     """
     return html_page("設定ページ", body, back_url="/admin", admin_round_watcher=True)
 
