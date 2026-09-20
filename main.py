@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -234,14 +234,45 @@ def time_picker(name: str, first_default: int = 19, second_default: int = 0,
         f'<option value="{i:02d}"{" selected" if i == first_default else ""}>{i:02d}</option>'
         for i in first_range
     )
-    second_range = range(min_minute, 60) if min_hour is not None else range(60)
+    # 分の選択肢は常に0〜59を出しておき、選んだ時が最短の時と同じ場合だけ
+    # JS側で現在時刻より前の分を除外する（それより後の時を選べば全分が使える）
     second_options = "".join(
         f'<option value="{i:02d}"{" selected" if i == second_default else ""}>{i:02d}</option>'
-        for i in second_range
+        for i in range(60)
     )
+    min_attrs = f' data-min-hour="{min_hour}" data-min-minute="{min_minute}"' if min_hour is not None else ""
+    onchange_attr = f' onchange="restrictMinutes_{name}()"' if min_hour is not None else ""
+    restrict_script = f"""
+    <script>
+        (function() {{
+            function restrictMinutes_{name}() {{
+                const hourSelect = document.getElementById('{name}_a');
+                const minuteSelect = document.getElementById('{name}_b');
+                if (!hourSelect || !minuteSelect || !hourSelect.dataset.minHour) return;
+                const minHour = parseInt(hourSelect.dataset.minHour, 10);
+                const minMinute = parseInt(hourSelect.dataset.minMinute, 10);
+                const selectedHour = parseInt(hourSelect.value, 10);
+                const currentVal = minuteSelect.value;
+                const floor = (selectedHour === minHour) ? minMinute : 0;
+                let html = '';
+                for (let m = floor; m < 60; m++) {{
+                    const v = String(m).padStart(2, '0');
+                    html += '<option value="' + v + '"' + (v === currentVal ? ' selected' : '') + '>' + v + '</option>';
+                }}
+                minuteSelect.innerHTML = html;
+                if (!Array.from(minuteSelect.options).some(function(o) {{ return o.value === currentVal; }})) {{
+                    minuteSelect.selectedIndex = 0;
+                }}
+            }}
+            window.restrictMinutes_{name} = restrictMinutes_{name};
+            restrictMinutes_{name}();
+        }})();
+    </script>
+    """ if min_hour is not None else ""
     return f"""
-    <select name="{name}_a">{first_options}</select> {first_label}
-    <select name="{name}_b">{second_options}</select> {second_label}
+    <select name="{name}_a" id="{name}_a"{min_attrs}{onchange_attr}>{first_options}</select> {first_label}
+    <select name="{name}_b" id="{name}_b">{second_options}</select> {second_label}
+    {restrict_script}
     """
 
 # -----------------------
@@ -282,12 +313,18 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
         <div class="popup-box">
             <p id="round-watch-title">ラウンド終了！</p>
             <div id="round-watch-next-pairs"></div>
-            <form action="/admin/status/next_round" method="post">
-                <button type="submit">次のラウンドへ進む</button>
-            </form>
+            <div style="display:flex; gap:10px; justify-content:center;">
+                <button onclick="advanceRoundFromWatcher()">Yes</button>
+                <button onclick="document.getElementById('round-watch-popup').style.display='none'" style="background:#999;">No</button>
+            </div>
         </div>
     </div>
     <script>
+        function advanceRoundFromWatcher() {
+            fetch('/admin/status/next_round', { method: 'POST' }).then(function() {
+                document.getElementById('round-watch-popup').style.display = 'none';
+            }).catch(function() {});
+        }
         (function() {
             let notified = false;
             function pollRoundStatus() {
@@ -334,7 +371,7 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                 margin-bottom: 20px;
             }}
             .card {{
-                background-image: linear-gradient(rgba(255,255,255,0.9), rgba(255,255,255,0.9)), url('/static/welcome-bg.webp');
+                background-image: linear-gradient(rgba(255,255,255,0.65), rgba(255,255,255,0.65)), url('/static/welcome-bg.webp');
                 background-size: cover;
                 background-position: center;
                 background-color: white;
@@ -450,6 +487,9 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                 color: #7a97b8;
                 margin-top: 2px;
             }}
+            button .btn-sub {{
+                color: rgba(255,255,255,0.85);
+            }}
             .clock {{
                 font-size: 16px;
                 color: #666;
@@ -514,19 +554,13 @@ def welcome(registered: str = None):
     <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
         <div style="text-align:center;">
             <p style="font-weight:bold; color:#555; margin-bottom:8px;">Instructor</p>
-            <a href="/admin"><img src="/qr/instructor" width="110" height="110" alt="Instructor QR" /></a>
-            <div style="margin-top:14px;">
-                <a href="/admin"><img src="/static/instructor-photo.png" alt="Instructor" width="200" height="200"
-                    style="object-fit:cover; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
-            </div>
+            <a href="/admin"><img src="/static/instructor-photo.png" alt="Instructor" width="200" height="200"
+                style="object-fit:cover; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
         </div>
         <div style="text-align:center;">
             <p style="font-weight:bold; color:#555; margin-bottom:8px;">Member</p>
-            <a href="/member/register"><img src="/qr/member" width="110" height="110" alt="Member QR" /></a>
-            <div style="margin-top:14px;">
-                <a href="/member/register"><img src="/static/member-icon.png" alt="Member" width="200" height="200"
-                    style="object-fit:contain; background:#f2f2f2; border-radius:12px; padding:20px; box-sizing:border-box; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
-            </div>
+            <a href="/member/register"><img src="/static/member-icon.png" alt="Member" width="200" height="200"
+                style="object-fit:contain; background:#f2f2f2; border-radius:12px; padding:20px; box-sizing:border-box; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
         </div>
     </div>
     """
@@ -579,10 +613,10 @@ def member_register_page():
 @app.get("/member/register/join", response_class=HTMLResponse)
 def member_register_join_page():
     body = """
-    <p>本日、定時に参加しますか？</p>
+    <p>本日、定時に参加しますか？<span class="btn-sub" style="margin-top:4px;">Are you arriving on time today?</span></p>
     <form action="/member/register/attendance" method="post">
-        <button name="on_time" value="yes" type="submit">はい</button>
-        <button name="on_time" value="no" type="submit">いいえ</button>
+        <button name="on_time" value="yes" type="submit">はい<span class="btn-sub">Yes</span></button>
+        <button name="on_time" value="no" type="submit">いいえ<span class="btn-sub">No</span></button>
     </form>
     """
     return html_page("スパーリング参加確認", body)
@@ -593,8 +627,9 @@ def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: s
         return f"""
         <form action="/member/register/name" method="post">
             <input type="hidden" name="on_time" value="yes" />
-            名前（重複不可）: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
-            <button type="submit">登録</button>
+            名前（重複不可）<span class="btn-sub" style="display:inline;">(Name, must be unique)</span>:
+            <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
+            <button type="submit">登録<span class="btn-sub">Register</span></button>
         </form>
         """
     now = now_jst()
@@ -606,12 +641,13 @@ def member_name_entry_form(on_time: str, late_time_a: str = None, late_time_b: s
     return f"""
     <form action="/member/register/name" method="post">
         <input type="hidden" name="on_time" value="no" />
-        何時に来ますか？<br>
+        何時に来ますか？<span class="btn-sub" style="display:inline;">What time will you arrive?</span><br>
         {time_picker("late_time", first_default=default_hour, second_default=default_minute,
                       min_hour=now.hour, min_minute=now.minute)}
         <br><br>
-        名前（重複不可）: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
-        <button type="submit">登録</button>
+        名前（重複不可）<span class="btn-sub" style="display:inline;">(Name, must be unique)</span>:
+        <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
+        <button type="submit">登録<span class="btn-sub">Register</span></button>
     </form>
     """
 
@@ -744,20 +780,20 @@ def member_edit_time_select(name: str = Form(...), db: Session = Depends(get_db)
             h_default, m_default = now.hour, now.minute
 
     body = f"""
-    <p>{ts.member.name} さんのスパー参加時間を編集</p>
+    <p>{ts.member.name} さんのスパー参加時間を編集<span class="btn-sub" style="margin-top:4px;">Edit arrival time</span></p>
     <form action="/member/register/edit_time/save" method="post">
         <input type="hidden" name="member_id" value="{member_id}" />
-        何時に来ますか？<br>
+        何時に来ますか？<span class="btn-sub" style="display:inline;">What time will you arrive?</span><br>
         {time_picker("late_time", first_default=h_default, second_default=m_default,
                       min_hour=now.hour, min_minute=now.minute)}
         <br><br>
-        <button type="submit">更新</button>
+        <button type="submit">更新<span class="btn-sub">Update</span></button>
     </form>
     <br>
     <form action="/member/register/edit_time/cancel" method="post"
         onsubmit="return confirm('本日の参加を取り消しますか？')">
         <input type="hidden" name="member_id" value="{member_id}" />
-        <button type="submit" style="background:#c0392b;">不参加 (今日は行けません)</button>
+        <button type="submit" style="background:#c0392b;">不参加 (今日は行けません)<span class="btn-sub">Not attending today</span></button>
     </form>
     """
     return html_page("スパー参加時間を編集", body)
@@ -951,14 +987,14 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
 
     body = f"""
     <h2>本日の参加者</h2>
-    <div id="participant-list" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:left; font-size:14px;">
-        {grid_html}
-    </div>
-
-    <form action="/admin/members/add" method="post" style="margin-top:16px;">
+    <form action="/admin/members/add" method="post" style="margin-bottom:16px;">
         名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
         <button type="submit">追加</button>
     </form>
+
+    <div id="participant-list" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:left; font-size:14px;">
+        {grid_html}
+    </div>
 
     <script>
         (function() {{
@@ -1027,6 +1063,7 @@ def admin_members_remove(member_id: int = Form(...), db: Session = Depends(get_d
 @app.post("/admin/members/add", response_class=HTMLResponse)
 def admin_members_add(
     name: str = Form(...),
+    next_url: str = Form("/admin/members"),
     db: Session = Depends(get_db),
     _auth: None = Depends(require_admin)
 ):
@@ -1051,7 +1088,7 @@ def admin_members_add(
     ts.late_time = None
     db.commit()
 
-    return RedirectResponse(url="/admin/members", status_code=303)
+    return RedirectResponse(url=next_url, status_code=303)
 
 
 @app.get("/admin/setup", response_class=HTMLResponse)
@@ -1104,12 +1141,9 @@ def admin_setup(
 
 
 def resolve_pairs_after_absence(db: Session, absent_member_id: int, today: date):
-    # 現在表示中の4ラウンド（現在＋次の3）はそのまま固定し、
-    # それより先のラウンドのペアだけを待機者と直接入れ替える。
-    state = db.query(SparringState).filter(SparringState.date == today).first()
-    current_round = state.current_round if state else 1
-    locked_until = current_round + 3
-
+    # 「表示中のグループを固定する」とは、影響を受けていないペアを勝手に
+    # 組み直さないという意味。ステータスが変わった本人が含まれるペアだけを、
+    # それが今のラウンドでも先のラウンドでも直接編集する。
     active_ids = set(
         mid for (mid,) in db.query(TodaySparring.member_id).filter(TodaySparring.date == today).all()
     )
@@ -1117,7 +1151,6 @@ def resolve_pairs_after_absence(db: Session, absent_member_id: int, today: date)
     affected_pairs = db.query(SparringGroup).filter(
         SparringGroup.date == today,
         SparringGroup.is_waiting == False,
-        SparringGroup.round_number > locked_until,
         or_(
             SparringGroup.member_a_id == absent_member_id,
             SparringGroup.member_b_id == absent_member_id
@@ -1331,10 +1364,12 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                     <p>ラウンド{state.current_round}終了！</p>
                     {next_pairs_html}
                     <p>次のラウンドに進みますか？</p>
-                    <form action="/admin/status/next_round" method="post">
-                        <button type="submit">Yes</button>
-                    </form>
-                    <button onclick="document.getElementById('round-complete-popup').style.display='none'">No</button>
+                    <div style="display:flex; gap:10px; justify-content:center;">
+                        <form action="/admin/status/next_round" method="post" style="margin:0;">
+                            <button type="submit">Yes</button>
+                        </form>
+                        <button onclick="document.getElementById('round-complete-popup').style.display='none'" style="background:#999;">No</button>
+                    </div>
                 </div>
             </div>
             <div id="advance-round-fallback" style="display:none; margin-top:20px;">
@@ -1395,6 +1430,14 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
         </div>
         <div style="flex:1 1 300px;">
             {upcoming_html}
+            <div style="margin-top:20px; padding:16px; background:#f2f2f2; border-radius:12px; text-align:left;">
+                <h4 style="margin:0 0 10px;">参加者を直接追加</h4>
+                <form action="/admin/members/add" method="post">
+                    <input type="hidden" name="next_url" value="/admin/status" />
+                    名前: <input type="text" name="name" required {NAME_VALIDATION_ATTRS} />
+                    <button type="submit">追加</button>
+                </form>
+            </div>
         </div>
     </div>
     {popups_html}
