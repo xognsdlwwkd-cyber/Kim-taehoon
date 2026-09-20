@@ -21,7 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -418,6 +418,12 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
                 background: #dbe9fb;
                 text-decoration: none;
             }}
+            .btn-sub {{
+                display: block;
+                font-size: 12px;
+                color: #7a97b8;
+                margin-top: 2px;
+            }}
             .clock {{
                 font-size: 16px;
                 color: #666;
@@ -479,14 +485,31 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <div style="display:flex; justify-content:center; gap:40px; flex-wrap:wrap; margin-top:20px;">
-        <div>
-            <a href="/member/register"><img src="/qr/member" width="150" height="150" alt="Member QR" /></a><br>
-            <a href="/member/register" class="link-btn">スパー参加登録</a>
-        </div>
-        <div>
-            <a href="/admin"><img src="/qr/instructor" width="150" height="150" alt="Instructor QR" /></a><br>
-            <a href="/admin" class="link-btn">インストラクターページ</a>
+    <div style="background-image: linear-gradient(rgba(255,255,255,0.88), rgba(255,255,255,0.88)), url('/static/welcome-bg.webp');
+        background-size: cover; background-position: center; border-radius: 12px; padding: 20px; margin: -20px -20px 0;">
+        <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
+            <div style="text-align:center;">
+                <p style="font-weight:bold; color:#555; margin-bottom:8px;">Instructor</p>
+                <a href="/admin"><img src="/static/instructor-photo.png" alt="Instructor" width="150" height="150"
+                    style="object-fit:cover; border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
+                <div style="margin-top:14px;">
+                    <a href="/admin"><img src="/qr/instructor" width="110" height="110" alt="Instructor QR" /></a>
+                </div>
+                <div style="margin-top:10px;">
+                    <a href="/admin" class="link-btn">インストラクターページ</a>
+                </div>
+            </div>
+            <div style="text-align:center;">
+                <p style="font-weight:bold; color:#555; margin-bottom:8px;">Member</p>
+                <a href="/member/register"><img src="/static/member-icon.png" alt="Member" width="150" height="150"
+                    style="object-fit:contain; background:#f2f2f2; border-radius:12px; padding:15px; box-sizing:border-box; box-shadow:0 2px 8px rgba(0,0,0,0.15);" /></a>
+                <div style="margin-top:14px;">
+                    <a href="/member/register"><img src="/qr/member" width="110" height="110" alt="Member QR" /></a>
+                </div>
+                <div style="margin-top:10px;">
+                    <a href="/member/register" class="link-btn">スパー参加登録<span class="btn-sub">Join Registration</span></a>
+                </div>
+            </div>
         </div>
     </div>
     """
@@ -530,8 +553,8 @@ def qr_image_response(data: str) -> Response:
 @app.get("/member/register", response_class=HTMLResponse)
 def member_register_page():
     body = """
-    <a href="/member/register/join" class="link-btn">スパーリングに参加 (Join Sparring)</a><br><br>
-    <a href="/member/register/edit_time" class="link-btn">スパー参加時間を編集 (Edit Coming Time)</a>
+    <a href="/member/register/join" class="link-btn">スパーリングに参加<span class="btn-sub">Join Sparring</span></a><br><br>
+    <a href="/member/register/edit_time" class="link-btn">スパー参加時間を編集<span class="btn-sub">Edit Coming Time</span></a>
     """
     return html_page("スパー参加登録", body)
 
@@ -897,7 +920,7 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
         grid_html = "<p>まだ参加者がいません。</p>"
 
     body = f"""
-    <h2 id="participant-count">本日の参加者（{len(members_today)}名）</h2>
+    <h2>本日の参加者</h2>
     <div id="participant-list" style="display:grid; grid-template-columns: repeat(4, 1fr); gap:4px; text-align:left; font-size:14px;">
         {grid_html}
     </div>
@@ -915,7 +938,6 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
             }}
             function refreshParticipants() {{
                 fetch('/admin/members/poll').then(function(r) {{ return r.json(); }}).then(function(data) {{
-                    document.getElementById('participant-count').innerText = '本日の参加者（' + data.count + '名）';
                     const list = document.getElementById('participant-list');
                     if (data.members.length === 0) {{
                         list.innerHTML = '<p>まだ参加者がいません。</p>';
