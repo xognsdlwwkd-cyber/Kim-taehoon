@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.12"
+APP_VERSION = "1.0.13"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -232,7 +232,8 @@ def not_authenticated_handler(request: Request, exc: NotAuthenticated):
 
 
 def require_admin(request: Request):
-    if request.cookies.get("admin_auth") != "1":
+    # その日のうちは再入力不要。日付が変わったら再度パスワードを求める
+    if request.cookies.get("admin_auth") != str(today_jst()):
         raise NotAuthenticated()
 
 
@@ -1039,9 +1040,9 @@ def admin_login_page():
 @app.post("/admin/login", response_class=HTMLResponse)
 def admin_login(password: str = Form(...), db: Session = Depends(get_db)):
     if password.strip().lower() == ADMIN_PASSWORD:
-        # ログイン後はこの端末でパスワードを再要求しない（30日間有効なCookie）
+        # ログイン後はその日のうちは再要求しない。日付が変われば再度必要になる
         response = RedirectResponse(url="/admin", status_code=303)
-        response.set_cookie("admin_auth", "1", httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
+        response.set_cookie("admin_auth", str(today_jst()), httponly=True, samesite="lax", max_age=60 * 60 * 36)
         return response
     return html_page("インストラクターページ ログイン", """
     <p style="color:#c0392b;">パスワードが違います。</p>
