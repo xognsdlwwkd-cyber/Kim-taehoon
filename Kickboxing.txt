@@ -1,0 +1,472 @@
+from fastapi import FastAPI, Form, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Boolean,
+    Date, DateTime, ForeignKey
+)
+from sqlalchemy.orm import sessionmaker, declarative_base, relationship, Session
+from datetime import datetime, date, timedelta
+import uvicorn
+
+DATABASE_URL = "sqlite:///./dojo.db"
+
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+app = FastAPI()
+
+# -----------------------
+# DB MODELS
+# -----------------------
+
+class Member(Base):
+    __tablename__ = "members"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.now)
+
+
+class TodaySparring(Base):
+    __tablename__ = "today_sparring"
+    id = Column(Integer, primary_key=True, index=True)
+    member_id = Column(Integer, ForeignKey("members.id"))
+    join_type = Column(String)  # "on_time" or "late"
+    late_time = Column(String, nullable=True)
+    date = Column(Date, default=date.today)
+    member = relationship("Member")
+
+
+class SparringSettings(Base):
+    __tablename__ = "sparring_settings"
+    id = Column(Integer, primary_key=True, index=True)
+    number_of_pairs = Column(Integer)
+    round_duration = Column(String)
+    number_of_rounds = Column(Integer)
+    max_waiting_per_round = Column(Integer)
+
+
+class SparringGroup(Base):
+    __tablename__ = "sparring_groups"
+    id = Column(Integer, primary_key=True, index=True)
+    round_number = Column(Integer)
+    pair_number = Column(Integer)
+    member_a_id = Column(Integer, ForeignKey("members.id"), nullable=True)
+    member_b_id = Column(Integer, ForeignKey("members.id"), nullable=True)
+    waiting_member_id = Column(Integer, ForeignKey("members.id"), nullable=True)
+    is_waiting = Column(Boolean, default=False)
+    remaining_time = Column(String, nullable=True)
+    date = Column(Date, default=date.today)
+
+    member_a = relationship("Member", foreign_keys=[member_a_id])
+    member_b = relationship("Member", foreign_keys=[member_b_id])
+    waiting_member = relationship("Member", foreign_keys=[waiting_member_id])
+
+
+Base.metadata.create_all(bind=engine)
+
+# -----------------------
+# DB SESSION
+# -----------------------
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# -----------------------
+# HTML TEMPLATE (DESIGN)
+# -----------------------
+
+def html_page(title: str, body: str) -> HTMLResponse:
+    return HTMLResponse(f"""
+    <html>
+    <head>
+        <title>{title}</title>
+        <style>
+            body {{
+                font-family: 'Yu Gothic', 'Meiryo', sans-serif;
+                background: #f2f2f2;
+                margin: 0;
+                padding: 20px;
+                text-align: center;
+            }}
+            h1 {{
+                color: #333;
+                margin-bottom: 20px;
+            }}
+            .card {{
+                background: white;
+                padding: 20px;
+                margin: 20px auto;
+                width: 80%;
+                max-width: 600px;
+                border-radius: 12px;
+                box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            }}
+            .pair-box {{
+                background: #4a90e2;
+                color: white;
+                padding: 15px;
+                margin: 10px auto;
+                border-radius: 10px;
+                width: 70%;
+                font-size: 20px;
+                font-weight: bold;
+            }}
+            .wait-box {{
+                background: #bfbfbf;
+                color: #333;
+                padding: 15px;
+                margin: 10px auto;
+                border-radius: 10px;
+                width: 70%;
+                font-size: 20px;
+                font-weight: bold;
+            }}
+            button {{
+                background: #4a90e2;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 8px;
+                font-size: 18px;
+                cursor: pointer;
+                margin: 10px;
+            }}
+            button:hover {{
+                background: #357ABD;
+            }}
+            input {{
+                padding: 10px;
+                font-size: 18px;
+                border-radius: 8px;
+                border: 1px solid #ccc;
+                width: 60%;
+            }}
+            a {{
+                font-size: 18px;
+                color: #4a90e2;
+                text-decoration: none;
+            }}
+            a:hover {{
+                text-decoration: underline;
+            }}
+        </style>
+    </head>
+    <body>
+        <h1>{title}</h1>
+        <div class="card">
+            {body}
+        </div>
+    </body>
+    </html>
+    """)
+
+# -----------------------
+# MEMBER FLOW
+# -----------------------
+
+@app.get("/", response_class=HTMLResponse)
+def welcome():
+    body = """
+    <p>キックボクシング エキスパートクラスへようこそ</p>
+    <a href="/member/register">メンバー登録</a><br><br>
+    <a href="/admin">インストラクターページ</a>
+    """
+    return html_page("ようこそ", body)
+
+
+@app.get("/member/register", response_class=HTMLResponse)
+def member_register_page():
+    body = """
+    <form action="/member/register" method="post">
+        名前（重複不可）: <input type="text" name="name" />
+        <button type="submit">登録</button>
+    </form>
+    """
+    return html_page("メンバー登録", body)
+
+
+@app.post("/member/register", response_class=HTMLResponse)
+def member_register(name: str = Form(...), db: Session = Depends(get_db)):
+    existing = db.query(Member).filter(Member.name == name).first()
+    if existing:
+        return html_page("メンバー登録", f"""
+        <p>この名前は既に登録されています: {name}</p>
+        <a href="/member/register">戻る</a>
+        """)
+    member = Member(name=name)
+    db.add(member)
+    db.commit()
+    db.refresh(member)
+
+    return RedirectResponse(url=f"/member/confirm/{member.id}", status_code=303)
+
+
+# -----------------------
+# CONFIRM PAGE (10秒自動戻り)
+# -----------------------
+
+@app.get("/member/confirm/{member_id}", response_class=HTMLResponse)
+def member_confirm(member_id: int, db: Session = Depends(get_db)):
+    member = db.query(Member).filter(Member.id == member_id).first()
+
+    body = f"""
+    <p>{member.name} さんの登録が完了しました。</p>
+    <p>最初のページに戻りますか？</p>
+
+    <form action="/member/confirm_action/{member_id}" method="post">
+        <button name="answer" value="yes" type="submit">はい</button>
+        <button name="answer" value="no" type="submit">いいえ</button>
+    </form>
+
+    <p style="margin-top:20px; color:#666;">
+        ※ 10秒以内に選択がない場合、自動的にトップページへ戻ります。
+    </p>
+
+    <script>
+        setTimeout(function() {{
+            window.location.href = "/";
+        }}, 10000);
+    </script>
+    """
+
+    return html_page("登録完了", body)
+
+
+@app.post("/member/confirm_action/{member_id}", response_class=HTMLResponse)
+def member_confirm_action(member_id: int, answer: str = Form(...)):
+    if answer == "yes":
+        return RedirectResponse(url="/", status_code=303)
+    else:
+        return RedirectResponse(url=f"/member/join/{member_id}", status_code=303)
+
+
+# -----------------------
+# JOIN FLOW
+# -----------------------
+
+@app.get("/member/join/{member_id}", response_class=HTMLResponse)
+def member_join_page(member_id: int, db: Session = Depends(get_db)):
+    member = db.query(Member).filter(Member.id == member_id).first()
+    body = f"""
+    <p>{member.name} さん</p>
+    <p>本日のスパーリングに定時参加しますか？</p>
+
+    <form action="/member/join/{member_id}" method="post">
+        <button name="answer" value="yes" type="submit">はい</button>
+        <button name="answer" value="no" type="submit">いいえ</button>
+    </form>
+    """
+    return html_page("スパーリング参加", body)
+
+
+@app.post("/member/join/{member_id}", response_class=HTMLResponse)
+def member_join(member_id: int, answer: str = Form(...), db: Session = Depends(get_db)):
+    member = db.query(Member).filter(Member.id == member_id).first()
+    today = date.today()
+
+    if answer == "yes":
+        ts = TodaySparring(
+            member_id=member.id,
+            join_type="on_time",
+            late_time=None,
+            date=today
+        )
+        db.add(ts)
+        db.commit()
+        return RedirectResponse(url=f"/member/today/{member.id}", status_code=303)
+
+    body = f"""
+    <p>何時に来ますか？ (例: 19:30)</p>
+    <form action="/member/join_late/{member_id}" method="post">
+        <input type="text" name="late_time" placeholder="19:30" />
+        <button type="submit">送信</button>
+    </form>
+    """
+    return html_page("遅れて参加", body)
+
+
+@app.post("/member/join_late/{member_id}", response_class=HTMLResponse)
+def member_join_late(member_id: int, late_time: str = Form(...), db: Session = Depends(get_db)):
+    member = db.query(Member).filter(Member.id == member_id).first()
+    today = date.today()
+    ts = TodaySparring(
+        member_id=member.id,
+        join_type="late",
+        late_time=late_time,
+        date=today
+    )
+    db.add(ts)
+    db.commit()
+    return RedirectResponse(url=f"/member/today/{member.id}", status_code=303)
+
+
+@app.get("/member/today/{member_id}", response_class=HTMLResponse)
+def member_today_group(member_id: int, db: Session = Depends(get_db)):
+    member = db.query(Member).filter(Member.id == member_id).first()
+    today = date.today()
+    groups = db.query(SparringGroup).filter(SparringGroup.date == today).all()
+
+    my_groups = [
+        g for g in groups
+        if g.member_a_id == member.id or g.member_b_id == member.id or g.waiting_member_id == member.id
+    ]
+
+    body = f"<p>{member.name} さんの本日のスパーリング組み合わせ</p>"
+    if not my_groups:
+        body += "<p>まだ組み合わせが作成されていません。</p>"
+    else:
+        for g in my_groups:
+            if g.is_waiting:
+                body += f"<div class='wait-box'>待機: {member.name}</div>"
+            else:
+                a = db.query(Member).filter(Member.id == g.member_a_id).first()
+                b = db.query(Member).filter(Member.id == g.member_b_id).first()
+                body += f"<div class='pair-box'>ペア {g.pair_number}: {a.name} vs {b.name}</div>"
+
+    return html_page("本日のスパーリング", body)
+
+# -----------------------
+# ADMIN FLOW
+# -----------------------
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_home(db: Session = Depends(get_db)):
+    today = date.today()
+    members_today = db.query(TodaySparring).filter(TodaySparring.date == today).all()
+    body = "<p>インストラクターページ</p>"
+    body += "<a href='/admin/setup'>設定ページ</a><br>"
+    body += "<a href='/admin/generate'>スパーリング開始（組み合わせ生成）</a><br>"
+    body += "<h2>本日の参加者</h2>"
+    for ts in members_today:
+        body += f"<p>{ts.member.name} - {ts.join_type}"
+        if ts.join_type == "late":
+            body += f"（到着予定: {ts.late_time}）"
+        body += "</p>"
+    return html_page("インストラクターページ", body)
+
+
+@app.get("/admin/setup", response_class=HTMLResponse)
+def admin_setup_page(db: Session = Depends(get_db)):
+    body = """
+    <form action="/admin/setup" method="post">
+        ペア数: <input type="number" name="number_of_pairs" value="4" /><br>
+        ラウンド時間 (MM:SS): <input type="text" name="round_duration" value="03:00" /><br>
+        ラウンド数: <input type="number" name="number_of_rounds" value="3" /><br>
+        最大待機人数: <input type="number" name="max_waiting_per_round" value="1" /><br>
+        <button type="submit">保存</button>
+    </form>
+    """
+    return html_page("設定ページ", body)
+
+
+@app.post("/admin/setup", response_class=HTMLResponse)
+def admin_setup(
+    number_of_pairs: int = Form(...),
+    round_duration: str = Form(...),
+    number_of_rounds: int = Form(...),
+    max_waiting_per_round: int = Form(...),
+    db: Session = Depends(get_db)
+):
+    setting = SparringSettings(
+        number_of_pairs=number_of_pairs,
+        round_duration=round_duration,
+        number_of_rounds=number_of_rounds,
+        max_waiting_per_round=max_waiting_per_round
+    )
+    db.add(setting)
+    db.commit()
+    return RedirectResponse(url="/admin", status_code=303)
+
+
+@app.get("/admin/generate", response_class=HTMLResponse)
+def admin_generate_groups(db: Session = Depends(get_db)):
+    today = date.today()
+    setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
+    if not setting:
+        return html_page("エラー", "設定がありません。先に設定ページで入力してください。")
+
+    participants = db.query(TodaySparring).filter(TodaySparring.date == today).all()
+    if not participants:
+        return html_page("エラー", "本日の参加者がいません。")
+
+    member_ids = [p.member_id for p in participants]
+    member_ids_sorted = sorted(member_ids)
+
+    db.query(SparringGroup).filter(SparringGroup.date == today).delete()
+    db.commit()
+
+    idx = 0
+    total_members = len(member_ids_sorted)
+
+    for round_num in range(1, setting.number_of_rounds + 1):
+        for pair_num in range(1, setting.number_of_pairs + 1):
+            if idx + 1 < total_members:
+                a_id = member_ids_sorted[idx]
+                b_id = member_ids_sorted[idx + 1]
+                idx += 2
+                group = SparringGroup(
+                    round_number=round_num,
+                    pair_number=pair_num,
+                    member_a_id=a_id,
+                    member_b_id=b_id,
+                    is_waiting=False,
+                    remaining_time=setting.round_duration,
+                    date=today
+                )
+                db.add(group)
+            else:
+                if idx < total_members:
+                    w_id = member_ids_sorted[idx]
+                    idx += 1
+                    group = SparringGroup(
+                        round_number=round_num,
+                        pair_number=0,
+                        waiting_member_id=w_id,
+                        is_waiting=True,
+                        remaining_time=setting.round_duration,
+                        date=today
+                    )
+                    db.add(group)
+                break
+    db.commit()
+    return RedirectResponse(url="/admin/status", status_code=303)
+
+
+@app.get("/admin/status", response_class=HTMLResponse)
+def admin_status(db: Session = Depends(get_db)):
+    today = date.today()
+    groups = db.query(SparringGroup).filter(SparringGroup.date == today).all()
+    setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
+
+    body = "<h2>スパーリング状況</h2>"
+    if not groups:
+        body += "<p>まだ組み合わせがありません。</p>"
+        return html_page("スパーリング状況", body)
+
+    total_rounds = setting.number_of_rounds if setting else 0
+
+    if setting:
+        mm, ss = map(int, setting.round_duration.split(":"))
+        per_round = timedelta(minutes=mm, seconds=ss)
+        session_complete_time = datetime.now() + per_round * setting.number_of_rounds
+        body += f"<p>総ラウンド数: {total_rounds} ラウンド</p>"
+        body += f"<p>セッション終了予定時刻: {session_complete_time.strftime('%H:%M')}</p>"
+
+    rounds = {}
+    for g in groups:
+        rounds.setdefault(g.round_number, []).append(g)
+
+    for r_num, r_groups in rounds.items():
+        body += f"<h3>ラウンド {r_num}</h3>"
+        for g in r_groups:
+            if g.is_waiting:
+                w = db.query(Member).filter(Member.id == g.waiting_member_id).first()
+                body += f"<div class='wait-box'>待機: {w.name}</div>"
+            else:
+                a = db.query(Member).filter(Member.id == g.member_a_id).first()
+                b = db.query(Member).filter(Member.id == g.member_b_id).first()

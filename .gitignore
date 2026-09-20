@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+build/
+dist/
+vendor/
+*.spec
+*.log
+dojo.db
+ngrok_authtoken.txt
+.claude/
