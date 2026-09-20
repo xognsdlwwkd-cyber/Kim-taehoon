@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.7"
+APP_VERSION = "1.0.8"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -137,6 +137,7 @@ class SparringSettings(Base):
     round_duration = Column(String)
     number_of_rounds = Column(Integer)
     max_skip_rounds = Column(Integer, default=2)
+    break_duration = Column(String, default="00:30")
 
 
 class SparringGroup(Base):
@@ -174,6 +175,9 @@ with engine.connect() as conn:
     existing_columns = [row[1] for row in conn.execute(text("PRAGMA table_info(sparring_settings)"))]
     if "max_skip_rounds" not in existing_columns:
         conn.execute(text("ALTER TABLE sparring_settings ADD COLUMN max_skip_rounds INTEGER DEFAULT 2"))
+        conn.commit()
+    if "break_duration" not in existing_columns:
+        conn.execute(text("ALTER TABLE sparring_settings ADD COLUMN break_duration TEXT DEFAULT '00:30'"))
         conn.commit()
 
     existing_ts_columns = [row[1] for row in conn.execute(text("PRAGMA table_info(today_sparring)"))]
@@ -305,7 +309,11 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
     <script>
         (function() {{
             try {{
-                if (localStorage.getItem('member_qr_hidden') === '1') {{
+                // スマホなど狭い画面では、明示的に「表示」に切り替えていない限り
+                // 常時表示のQRコードは邪魔になるためデフォルトで非表示にする
+                const pref = localStorage.getItem('member_qr_hidden');
+                const shouldHide = pref === '1' || (pref === null && window.innerWidth < 700);
+                if (shouldHide) {{
                     document.addEventListener('DOMContentLoaded', function() {{
                         const box = document.getElementById('member-qr-box');
                         if (box) box.style.display = 'none';
@@ -567,7 +575,6 @@ def welcome(registered: str = None):
     body = f"""
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center; margin-bottom:16px;">
         <button onclick="openQrShareBox()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">QRコードを共有<span class="btn-sub">Share QR</span></button>
-        <button onclick="sharePageLink()" style="background:#eee; color:#666; font-size:13px; padding:6px 14px;">🔗 リンクを共有<span class="btn-sub">Share page link</span></button>
     </div>
     <div class="popup-overlay" id="qr-share-popup">
         <div class="popup-box">
@@ -584,28 +591,25 @@ def welcome(registered: str = None):
             document.getElementById('qr-share-popup').style.display = 'block';
         }}
         async function shareQrImage() {{
+            const qrUrl = window.location.origin + '/qr/member';
             try {{
                 const resp = await fetch('/qr/member');
                 const blob = await resp.blob();
                 const file = new File([blob], 'member-qr.png', {{ type: 'image/png' }});
                 if (navigator.canShare && navigator.canShare({{ files: [file] }})) {{
                     await navigator.share({{ files: [file], title: 'スパー参加用QRコード' }});
+                    return;
                 }} else if (navigator.share) {{
-                    await navigator.share({{ title: 'スパー参加用QRコード', url: window.location.origin + '/qr/member' }});
-                }} else {{
-                    alert('この端末では共有機能が使えません。リンク: ' + window.location.origin + '/qr/member');
+                    await navigator.share({{ title: 'スパー参加用QRコード', url: qrUrl }});
+                    return;
                 }}
             }} catch (e) {{}}
-        }}
-        async function sharePageLink() {{
             try {{
-                if (navigator.share) {{
-                    await navigator.share({{ title: document.title, url: window.location.href }});
-                }} else {{
-                    await navigator.clipboard.writeText(window.location.href);
-                    alert('リンクをコピーしました / Link copied');
-                }}
-            }} catch (e) {{}}
+                await navigator.clipboard.writeText(qrUrl);
+                alert('この端末では共有機能が使えないため、リンクをコピーしました。\\nCould not share directly, copied the link instead:\\n' + qrUrl);
+            }} catch (e) {{
+                alert('この端末では共有機能が使えません。リンク: \\nShare is unavailable on this device. Link:\\n' + qrUrl);
+            }}
         }}
     </script>
     <div style="display:flex; justify-content:center; gap:50px; flex-wrap:wrap;">
@@ -636,9 +640,7 @@ def welcome(registered: str = None):
             }}, 3000);
         </script>
         """
-    response = html_page("Welcome to the CAVE Expert Class", body)
-    response.delete_cookie("admin_auth")
-    return response
+    return html_page("Welcome to the CAVE Expert Class", body)
 
 
 @app.get("/qr/member")
@@ -954,10 +956,9 @@ def admin_login_page():
 @app.post("/admin/login", response_class=HTMLResponse)
 def admin_login(password: str = Form(...), db: Session = Depends(get_db)):
     if password.strip().lower() == ADMIN_PASSWORD:
-        # ログイン後はCookieを保持し、インストラクターページ内の移動ではパスワードを
-        # 再要求しない。トップページ（"/"）に戻ると自動的に失効する。
+        # ログイン後はこの端末でパスワードを再要求しない（30日間有効なCookie）
         response = RedirectResponse(url="/admin", status_code=303)
-        response.set_cookie("admin_auth", "1", httponly=True, samesite="lax")
+        response.set_cookie("admin_auth", "1", httponly=True, samesite="lax", max_age=60 * 60 * 24 * 30)
         return response
     return html_page("インストラクターページ ログイン", """
     <p style="color:#c0392b;">パスワードが違います。</p>
@@ -1186,9 +1187,11 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         rounds_value = setting.number_of_rounds
         skip_value = setting.max_skip_rounds
         duration_m, duration_s = map(int, setting.round_duration.split(":"))
+        break_m, break_s = map(int, (setting.break_duration or "00:30").split(":"))
     else:
         pairs_value, rounds_value, skip_value = 4, 3, 2
         duration_m, duration_s = 3, 0
+        break_m, break_s = 0, 30
 
     body = f"""
     <form action="/admin/setup" method="post">
@@ -1197,6 +1200,10 @@ def admin_setup_page(db: Session = Depends(get_db), _auth: None = Depends(requir
         {time_picker("round_duration", first_default=duration_m, second_default=duration_s, first_max=10, first_label="分", second_label="秒")}
         <br><br>
         ラウンド数 (Number of Sparrings): <input type="number" name="number_of_rounds" value="{rounds_value}" /><br><br>
+        休憩時間 (Break between rounds):<br>
+        {time_picker("break_duration", first_default=break_m, second_default=break_s, first_max=10, first_label="分", second_label="秒")}
+        <p style="font-size:14px;color:#666;">※ ラウンド終了後、この時間操作がなければ自動で次のラウンドに進みます。</p>
+        <br>
         スパーリングスキップ (最大連続待機ラウンド数): <input type="number" name="max_skip_rounds" value="{skip_value}" /><br>
         <p style="font-size:14px;color:#666;">※ この回数を超えて連続で待機させないよう、優先的に組み合わせます。</p>
         <button type="submit">保存</button>
@@ -1212,6 +1219,8 @@ def admin_setup(
     round_duration_b: str = Form(...),
     number_of_rounds: int = Form(...),
     max_skip_rounds: int = Form(...),
+    break_duration_a: str = Form("00"),
+    break_duration_b: str = Form("30"),
     db: Session = Depends(get_db),
     _auth: None = Depends(require_admin)
 ):
@@ -1219,7 +1228,8 @@ def admin_setup(
         number_of_pairs=number_of_pairs,
         round_duration=f"{round_duration_a}:{round_duration_b}",
         number_of_rounds=number_of_rounds,
-        max_skip_rounds=max_skip_rounds
+        max_skip_rounds=max_skip_rounds,
+        break_duration=f"{break_duration_a}:{break_duration_b}"
     )
     db.add(setting)
     db.commit()
@@ -1453,8 +1463,11 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
         remaining_rounds = max(total_rounds - state.current_round + 1, 0)
         info_html += f"<p>残りラウンド数: {remaining_rounds} ラウンド</p>"
         info_html += f"<p>セッション終了予定時刻: {session_complete_time.strftime('%H:%M')}</p>"
+        bm, bs = map(int, (setting.break_duration or "00:30").split(":"))
+        break_duration_seconds = bm * 60 + bs
     else:
         round_duration_seconds = 0
+        break_duration_seconds = 30
 
     # 現在のラウンド
     popups_html = ""
@@ -1492,11 +1505,17 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <form action="/admin/status/resume_round" method="post" style="margin:0;">
                     <button type="submit" style="background:#4a90e2;">再開する (Resume)</button>
                 </form>
-                <form action="/admin/status/next_round" method="post" style="margin:0;"
-                    onsubmit="return confirm('ラウンドをスキップしますか？ / Skip this round?')">
-                    <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
-                </form>
+                <button type="button" onclick="handleSkipRound(true)" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
             </div>
+            <script>
+                function handleSkipRound(alreadyPaused) {{
+                    if (confirm('ラウンドをスキップしますか？ / Skip this round?')) {{
+                        fetch('/admin/status/skip_round', {{ method: 'POST' }}).then(function() {{ window.location.reload(); }});
+                    }} else if (!alreadyPaused) {{
+                        fetch('/admin/status/resume_round', {{ method: 'POST' }}).then(function() {{ window.location.reload(); }});
+                    }}
+                }}
+            </script>
             """
             left_html += render_round_groups(db, current_groups)
 
@@ -1507,11 +1526,24 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <form action="/admin/status/pause_round" method="post" style="margin:0;">
                     <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
                 </form>
-                <form action="/admin/status/next_round" method="post" style="margin:0;"
-                    onsubmit="return confirm('ラウンドをスキップしますか？ / Skip this round?')">
-                    <button type="submit" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
-                </form>
+                <button type="button" onclick="handleSkipRound(false)" style="background:#999;">ラウンドスキップ<span class="btn-sub">Skip round</span></button>
             </div>
+            <script>
+                function handleSkipRound(alreadyPaused) {
+                    function confirmAndSkip() {
+                        if (confirm('ラウンドをスキップしますか？ / Skip this round?')) {
+                            fetch('/admin/status/skip_round', { method: 'POST' }).then(function() { window.location.reload(); });
+                        } else {
+                            fetch('/admin/status/resume_round', { method: 'POST' }).then(function() { window.location.reload(); });
+                        }
+                    }
+                    if (alreadyPaused) {
+                        confirmAndSkip();
+                    } else {
+                        fetch('/admin/status/pause_round', { method: 'POST' }).then(confirmAndSkip);
+                    }
+                }
+            </script>
             """
             left_html += render_round_groups(db, current_groups)
 
@@ -1533,7 +1565,8 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 <div class="popup-box">
                     <p>ラウンド{state.current_round}終了！</p>
                     {next_pairs_html}
-                    <p>次のラウンドに進みますか？</p>
+                    <p>次のラウンドに進みますか？<span class="btn-sub" style="display:block;">
+                        <span id="break-countdown">{break_duration_seconds}</span>秒操作がなければ自動で進みます</span></p>
                     <div style="display:flex; gap:10px; justify-content:center;">
                         <form action="/admin/status/next_round" method="post" style="margin:0;">
                             <button type="submit">Yes</button>
@@ -1547,7 +1580,23 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             <script>
                 const startTime = new Date("{start_iso}");
                 const duration = {round_duration_seconds};
+                const breakDuration = {break_duration_seconds};
                 let timerInterval;
+                let breakInterval;
+                function startBreakCountdown() {{
+                    let remaining = breakDuration;
+                    const el = document.getElementById('break-countdown');
+                    breakInterval = setInterval(function() {{
+                        remaining -= 1;
+                        if (el) el.innerText = Math.max(remaining, 0);
+                        if (remaining <= 0) {{
+                            clearInterval(breakInterval);
+                            fetch('/admin/status/next_round', {{ method: 'POST' }}).then(function() {{
+                                window.location.reload();
+                            }}).catch(function() {{}});
+                        }}
+                    }}, 1000);
+                }}
                 function tickTimer() {{
                     const elapsed = Math.floor((Date.now() - startTime.getTime()) / 1000);
                     const remaining = duration - elapsed;
@@ -1556,6 +1605,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                         timerEl.innerText = "00:00";
                         if (timerInterval) clearInterval(timerInterval);
                         document.getElementById('round-complete-popup').style.display = 'block';
+                        startBreakCountdown();
                     }} else {{
                         const m = String(Math.floor(remaining / 60)).padStart(2, '0');
                         const s = String(remaining % 60).padStart(2, '0');
@@ -1592,11 +1642,15 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             try {
                 if (navigator.share) {
                     await navigator.share({ title: document.title, url: window.location.href });
-                } else {
-                    await navigator.clipboard.writeText(window.location.href);
-                    alert('リンクをコピーしました / Link copied');
+                    return;
                 }
             } catch (e) {}
+            try {
+                await navigator.clipboard.writeText(window.location.href);
+                alert('リンクをコピーしました\\nLink copied:\\n' + window.location.href);
+            } catch (e) {
+                alert('共有機能が使えません。リンク:\\nShare unavailable. Link:\\n' + window.location.href);
+            }
         }
     </script>
     """
@@ -1711,6 +1765,20 @@ def admin_status_next_round(db: Session = Depends(get_db), _auth: None = Depends
     state.paused_remaining_seconds = None
     db.commit()
     return RedirectResponse(url="/admin/status", status_code=303)
+
+
+@app.post("/admin/status/skip_round")
+def admin_status_skip_round(db: Session = Depends(get_db), _auth: None = Depends(require_admin)):
+    today = today_jst()
+    state = get_or_create_state(db, today)
+    state.current_round += 1
+    # スキップ後は自動的に走らせず、指導員がStartを押すまで待つ
+    state.is_running = False
+    state.round_started_at = None
+    state.is_paused = False
+    state.paused_remaining_seconds = None
+    db.commit()
+    return JSONResponse({"status": "ok"})
 
 
 @app.post("/admin/status/pause_round", response_class=HTMLResponse)
