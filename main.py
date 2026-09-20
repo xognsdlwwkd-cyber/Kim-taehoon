@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -1131,8 +1131,6 @@ def render_participant_cell(member_id: int, name: str, join_type: str, late_time
     text = f"{name} - {'定時' if join_type == 'on_time' else '遅刻'}"
     if join_type == "late":
         text += f"（到着予定: {late_time}）"
-    if joined_at_label:
-        text += f" <span style='color:#999;font-size:13px;'>[{joined_at_label}]</span>"
     return f"""
     <div style='padding:6px; border-bottom:1px solid #eee;'>
         {text}<br>
@@ -1168,6 +1166,20 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
     </div>
 
     <script>
+        function showClosableToast(message) {{
+            const toast = document.createElement('div');
+            toast.style.cssText = 'position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:10px 16px; border-radius:8px; font-size:14px; z-index:3000; display:flex; align-items:center; gap:12px; max-width:90vw;';
+            const msg = document.createElement('span');
+            msg.innerText = message;
+            const closeBtn = document.createElement('button');
+            closeBtn.innerText = '×';
+            closeBtn.style.cssText = 'background:none; color:white; border:none; font-size:18px; line-height:1; padding:0; margin:0; cursor:pointer;';
+            closeBtn.onclick = function() {{ toast.remove(); }};
+            toast.appendChild(msg);
+            toast.appendChild(closeBtn);
+            document.body.appendChild(toast);
+            setTimeout(function() {{ toast.remove(); }}, 5000);
+        }}
         function submitAddParticipant(event, form) {{
             event.preventDefault();
             const input = form.querySelector('input[name="name"]');
@@ -1179,9 +1191,10 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
                 body: 'name=' + encodeURIComponent(name)
             }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
                 if (data.status === 'duplicate') {{
-                    alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
+                    showClosableToast('この名前は既に登録されています。文字を追加して区別してください。');
                 }} else {{
                     input.value = '';
+                    showClosableToast(name + ' さんの登録が完了しました');
                     if (typeof refreshParticipants === 'function') refreshParticipants();
                 }}
             }}).catch(function() {{}});
@@ -1203,7 +1216,6 @@ def admin_members_page(db: Session = Depends(get_db), _auth: None = Depends(requ
                     list.innerHTML = data.members.map(function(m) {{
                         let text = escapeHtml(m.name) + ' - ' + (m.join_type === 'on_time' ? '定時' : '遅刻');
                         if (m.join_type !== 'on_time') text += '（到着予定: ' + escapeHtml(m.late_time || '') + '）';
-                        if (m.joined_at) text += ' <span style="color:#999;font-size:13px;">[' + m.joined_at + ']</span>';
                         return '<div style="padding:6px; border-bottom:1px solid #eee;">' + text +
                             '<br><form action="/admin/members/remove" method="post" onsubmit="return confirm(\\'本日の参加者から削除しますか？\\')" style="display:inline;">' +
                             '<input type="hidden" name="member_id" value="' + m.member_id + '" />' +
@@ -1850,13 +1862,28 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                             body: 'name=' + encodeURIComponent(name)
                         }}).then(function(r) {{ return r.json(); }}).then(function(data) {{
                             if (data.status === 'duplicate') {{
-                                alert('この名前は既に登録されています。文字を追加して区別してください。\\nName already enrolled, add more letters to distinguish');
+                                showClosableToast('この名前は既に登録されています。文字を追加して区別してください。');
                             }} else {{
                                 input.value = '';
+                                showClosableToast(name + ' さんの登録が完了しました');
                                 showMinSkipToast(data.count);
                             }}
                         }}).catch(function() {{}});
                         return false;
+                    }}
+                    function showClosableToast(message) {{
+                        const toast = document.createElement('div');
+                        toast.style.cssText = 'position:fixed; top:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:10px 16px; border-radius:8px; font-size:14px; z-index:3000; display:flex; align-items:center; gap:12px; max-width:90vw;';
+                        const msg = document.createElement('span');
+                        msg.innerText = message;
+                        const closeBtn = document.createElement('button');
+                        closeBtn.innerText = '×';
+                        closeBtn.style.cssText = 'background:none; color:white; border:none; font-size:18px; line-height:1; padding:0; margin:0; cursor:pointer;';
+                        closeBtn.onclick = function() {{ toast.remove(); }};
+                        toast.appendChild(msg);
+                        toast.appendChild(closeBtn);
+                        document.body.appendChild(toast);
+                        setTimeout(function() {{ toast.remove(); }}, 5000);
                     }}
                     function showMinSkipToast(count) {{
                         const minSkip = calcMinSkip(count);
