@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
-APP_VERSION = "1.0.15"
+APP_VERSION = "1.0.16"
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -1583,6 +1583,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
     today = today_jst()
     groups = db.query(SparringGroup).filter(SparringGroup.date == today).all()
     setting = db.query(SparringSettings).order_by(SparringSettings.id.desc()).first()
+    total_participants_now = db.query(TodaySparring).filter(TodaySparring.date == today).count()
 
     if not groups:
         body = "<h2>スパーリング状況</h2><p>まだ組み合わせがありません。</p>"
@@ -1655,7 +1656,7 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
             <p>Remaining TIME: <span id='timer' style='font-size:28px;font-weight:bold;'>--:--</span></p>
             <div style="display:flex; gap:8px;">
                 <form action="/admin/status/pause_round" method="post" style="margin:0;">
-                    <button type="submit" style="background:#e2954a;">一時停止 (Stop)</button>
+                    <button type="submit" style="background:#e2954a;">一時停止</button>
                 </form>
                 <button type="button" onclick="handleSkipRound(false)" style="background:#999;">スキップ</button>
             </div>
@@ -1814,6 +1815,12 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                 </form>
                 <script>
                     const statusPairsValue = {setting.number_of_pairs if setting else 0};
+                    function calcMinSkip(count) {{
+                        const slots = statusPairsValue * 2;
+                        if (slots <= 0 || count <= slots) return 0;
+                        return Math.ceil((count - slots) / slots);
+                    }}
+                    let lastMinSkip = calcMinSkip({total_participants_now});
                     function submitAddParticipantStatus(event, form) {{
                         event.preventDefault();
                         const input = form.querySelector('input[name="name"]');
@@ -1834,9 +1841,9 @@ def admin_status(db: Session = Depends(get_db), _auth: None = Depends(require_ad
                         return false;
                     }}
                     function showMinSkipToast(count) {{
-                        const slots = statusPairsValue * 2;
-                        if (slots <= 0 || count <= slots) return;
-                        const minSkip = Math.ceil((count - slots) / slots);
+                        const minSkip = calcMinSkip(count);
+                        if (minSkip === lastMinSkip) return;
+                        lastMinSkip = minSkip;
                         const toast = document.createElement('div');
                         toast.style.cssText = 'position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:#333; color:white; padding:10px 18px; border-radius:8px; font-size:14px; z-index:3000;';
                         toast.innerText = '理論上の最短待機ラウンド数: ' + minSkip;
