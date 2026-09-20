@@ -21,6 +21,8 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
     sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
+APP_VERSION = "1.0.1"
+
 JST = ZoneInfo("Asia/Tokyo")
 
 
@@ -401,6 +403,21 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
             a:hover {{
                 text-decoration: underline;
             }}
+            .link-btn {{
+                display: inline-block;
+                background: #eef4fc;
+                color: #357ABD;
+                padding: 12px 22px;
+                margin: 6px;
+                border-radius: 10px;
+                border: 1px solid #cfe0f5;
+                font-size: 18px;
+                text-decoration: none;
+            }}
+            .link-btn:hover {{
+                background: #dbe9fb;
+                text-decoration: none;
+            }}
             .clock {{
                 font-size: 16px;
                 color: #666;
@@ -436,6 +453,7 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
             <button onclick="{back_button_js}" style="background:#999;">戻る</button>
         </div>
         {round_watcher_html}
+        <div style="margin-top:20px; font-size:11px; color:#aaa;">v{APP_VERSION}</div>
         <script>
             function updateClock() {{
                 const now = new Date();
@@ -461,15 +479,14 @@ def html_page(title: str, body: str, back_url: str = None, show_member_qr: bool 
 @app.get("/", response_class=HTMLResponse)
 def welcome(registered: str = None):
     body = f"""
-    <p>Welcome to CAVE Expert Class</p>
     <div style="display:flex; justify-content:center; gap:40px; flex-wrap:wrap; margin-top:20px;">
         <div>
             <a href="/member/register"><img src="/qr/member" width="150" height="150" alt="Member QR" /></a><br>
-            <a href="/member/register">スパー参加登録</a>
+            <a href="/member/register" class="link-btn">スパー参加登録</a>
         </div>
         <div>
             <a href="/admin"><img src="/qr/instructor" width="150" height="150" alt="Instructor QR" /></a><br>
-            <a href="/admin">インストラクターページ</a>
+            <a href="/admin" class="link-btn">インストラクターページ</a>
         </div>
     </div>
     """
@@ -488,7 +505,9 @@ def welcome(registered: str = None):
             }}, 3000);
         </script>
         """
-    return html_page("Welcome to CAVE Expert Class", body)
+    response = html_page("Welcome to the CAVE Expert Class", body)
+    response.delete_cookie("admin_auth")
+    return response
 
 
 @app.get("/qr/member")
@@ -511,9 +530,8 @@ def qr_image_response(data: str) -> Response:
 @app.get("/member/register", response_class=HTMLResponse)
 def member_register_page():
     body = """
-    <p>スパー参加登録</p>
-    <a href="/member/register/join">スパーリングに参加 (Join Sparring)</a><br><br>
-    <a href="/member/register/edit_time">スパー参加時間を編集 (Edit Coming Time)</a>
+    <a href="/member/register/join" class="link-btn">スパーリングに参加 (Join Sparring)</a><br><br>
+    <a href="/member/register/edit_time" class="link-btn">スパー参加時間を編集 (Edit Coming Time)</a>
     """
     return html_page("スパー参加登録", body)
 
@@ -716,7 +734,7 @@ def member_edit_time_save(
 
     body = f"""
     <p>{ts.member.name} さんのスパー参加時間を更新しました。</p>
-    <a href="/">トップに戻る</a>
+    <a href="/" class="link-btn">トップに戻る</a>
     """
     return html_page("更新完了", body)
 
@@ -739,7 +757,7 @@ def member_edit_time_cancel(member_id: int = Form(...), db: Session = Depends(ge
 
     body = f"""
     <p>{member_name} さんの本日の参加を取り消しました。</p>
-    <a href="/">トップに戻る</a>
+    <a href="/" class="link-btn">トップに戻る</a>
     """
     return html_page("取消完了", body)
 
@@ -787,9 +805,11 @@ def admin_login_page():
 @app.post("/admin/login", response_class=HTMLResponse)
 def admin_login(password: str = Form(...), db: Session = Depends(get_db)):
     if password.strip().lower() == ADMIN_PASSWORD:
-        # セッション（Cookie）を保持しないため、リダイレクトではなく直接ページ内容を返す。
-        # こうすることで、このページ以降の別ページへの遷移では毎回パスワードが要求される。
-        return admin_home(db=db, _auth=None)
+        # ログイン後はCookieを保持し、インストラクターページ内の移動ではパスワードを
+        # 再要求しない。トップページ（"/"）に戻ると自動的に失効する。
+        response = RedirectResponse(url="/admin", status_code=303)
+        response.set_cookie("admin_auth", "1", httponly=True, samesite="lax")
+        return response
     return html_page("インストラクターページ ログイン", """
     <p style="color:#c0392b;">パスワードが違います。</p>
     <form action="/admin/login" method="post">
@@ -807,19 +827,18 @@ def admin_home(db: Session = Depends(get_db), _auth: None = Depends(require_admi
 
     if has_existing_groups:
         generate_link = (
-            '<a href="/admin/generate" '
+            '<a class="link-btn" href="/admin/generate" '
             'onclick="return confirm(\'スパーリングを再生成すると、現在の進行状況がリセットされます。よろしいですか？\')">'
             'スパーリング開始 (Join the Sparring)</a>'
         )
     else:
-        generate_link = '<a href="/admin/generate">スパーリング開始 (Join the Sparring)</a>'
+        generate_link = '<a class="link-btn" href="/admin/generate">スパーリング開始 (Join the Sparring)</a>'
 
     body = f"""
-    <p>インストラクターページ</p>
     <p style="color:#666;">本日の参加者数: {total_today} 名</p>
-    <a href="/admin/members">本日の参加者確認 (Check up Sparring Member)</a><br><br>
-    <a href="/admin/status">スパーリング状況 (Sparring Status)</a><br><br>
-    <a href="/admin/setup">設定 (Set up)</a><br><br>
+    <a href="/admin/members" class="link-btn">本日の参加者確認 (Check up Sparring Member)</a><br><br>
+    <a href="/admin/status" class="link-btn">スパーリング状況 (Sparring Status)</a><br><br>
+    <a href="/admin/setup" class="link-btn">設定 (Set up)</a><br><br>
     {generate_link}
     """
     return html_page("インストラクターページ", body, back_url="/", show_member_qr=True, admin_round_watcher=True)
